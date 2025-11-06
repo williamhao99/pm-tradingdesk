@@ -1,0 +1,82 @@
+# Secrets & Credentials
+.env
+*.pem
+src/kalshi/tools/hotkeys.json
+scripts/tail-stupidity.sh
+scripts/tail-sharp-traders.sh
+config/trader_list.json
+deployment/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Logs & Runtime Data
+*.log
+*.csv
+*.jsonl
+polymarket_activity_log.jsonl
+sports_monitor_state.json
+stupidity_state.json
+
+# Generated Data Files
+# Ignore trading/market data JSONs
+trading_*.json
+market_*.json
+**/data/*.json
+**/cache/*.json
+
+# Keep important configs
+!package.json
+!tsconfig.json
+
+# Private Documentation (keep local only)
+.claude/
+api-documentation/
+
+# Inactive & Legacy Code
+legacy/
+planned_features/
+
+# Docker (uncomment if needed)
+# docker-compose.override.yml
+
+# Testing (uncomment when tests are added)
+# .pytest_cache/
+# .coverage
+# htmlcov/
