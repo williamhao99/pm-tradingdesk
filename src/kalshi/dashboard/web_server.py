@@ -620,11 +620,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     orders_result = await kalshi_client.get_orders(status=status)
                     orders = orders_result.get("orders", [])
 
+                    orders_data = []
                     if orders:
                         tickers = list(set(order["ticker"] for order in orders))
                         market_data = await kalshi_client.get_markets_batch(tickers)
-
-                        orders_data = []
                         for order in orders:
                             ticker = order["ticker"]
                             title = ticker
