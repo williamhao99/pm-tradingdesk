@@ -25,6 +25,8 @@ Edit `.env` to add API credentials. Optional: configure Telegram for mobile aler
 # Kalshi hotkey trader
 ./scripts/run-hotkey-trader.sh
 
-# Polymarket monitor
-venv/bin/python -m src.polymarket.bots.sports_monitor --wallet 0x...
-```
+# Polymarket monitor (single wallet)
+venv/bin/python -m src.polymarket.bots.sports_monitor --wallet 0x... --name "Trader"
+
+# Polymarket monitor (multi-wallet from config)
+venv/bin/python -m src.polymarket.bots.sports_monitor --config config/trader_list.json

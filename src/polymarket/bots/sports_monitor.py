@@ -20,11 +20,14 @@ from dotenv import load_dotenv
 
 # Import utilities
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from src.polymarket.utils.telegram_notifier import TelegramNotifier, escape_markdown
+from src.polymarket.utils.telegram_notifier import TelegramNotifier, escape_markdown, UpdateStatus
 from src.polymarket.utils.portfolio_tracker import PortfolioTracker
 from src.polymarket.utils.state_manager import StateManager
 from src.polymarket.utils.log_rotator import LogRotator
 from src.polymarket.clients.polymarket_data_client import PolymarketDataClient
+from src.polymarket.utils.position_tracker_state import PositionTracker, NetPosition, PositionStatus
+from src.polymarket.utils.message_router import MessageRouter, MessageAction
+from src.polymarket.utils.message_formatter import MessageFormatter, BetInfo, ConvictionInfo
 
 load_dotenv()
 
@@ -115,21 +118,27 @@ class SportsMonitor:
 
     def __init__(
         self,
-        wallets: List[Tuple[str, str, Optional[int]]],
+        wallets: List[Tuple[str, str, Optional[int], Optional[str]]],
         poll_interval: int = 30,
         verbose: bool = False,
-        log_file: str = "sports_monitor.log",
-        state_file: str = "sports_monitor_state.json",
+        log_file: str = "data/sports_monitor.log",
+        state_file: str = "data/sports_monitor_state.json",
         telegram_chat_id: Optional[str] = None,
     ):
-        # Store wallets with (address, name, min_shares)
+        # Store wallets with (address, name, min_shares, profile_url)
         self.wallets = [
-            (addr.lower(), name, min_shares) for addr, name, min_shares in wallets
+            (addr.lower(), name, min_shares, profile_url)
+            for addr, name, min_shares, profile_url in wallets
         ]
 
-        # Create min_shares lookup dict for fast access
+        # Create min_shares lookup dict
         self.min_shares_by_wallet: Dict[str, Optional[int]] = {
-            addr.lower(): min_shares for addr, _, min_shares in wallets
+            addr.lower(): min_shares for addr, _, min_shares, _ in wallets
+        }
+
+        # Create profile_url lookup dict
+        self.profile_url_by_wallet: Dict[str, Optional[str]] = {
+            addr.lower(): profile_url for addr, _, _, profile_url in wallets
         }
 
         self.poll_interval = poll_interval
@@ -137,16 +146,29 @@ class SportsMonitor:
         self.log_file = Path(log_file)
         self.state_file = Path(state_file)
 
+        Path("data").mkdir(parents=True, exist_ok=True)
+
         self.seen_transactions: Dict[str, Deque[str]] = defaultdict(
             lambda: deque(maxlen=1000)
         )
 
-        # Cumulative share tracking for min_shares thresholds
-        self.cumulative_shares: Dict[Tuple[str, str, str, str], float] = {}
-        self.threshold_crossed: Dict[Tuple[str, str, str, str], bool] = {}
+        # Initialize PositionTracker utility
+        self.position_tracker = PositionTracker(verbose=verbose, logger=self._log)
         self.last_shares_cleanup = time.time()
+        self._poll_count = 0
 
-        # Initialize time tracking (needed by _log() method)
+        # Initialize MessageRouter utility
+        self.message_router = MessageRouter(
+            min_update_pct=5.0,  # 5% change required for update
+            min_update_abs=100.0,  # OR $100 absolute change
+            stale_threshold_seconds=self.STALE_MESSAGE_THRESHOLD_SECONDS,
+            verbose=verbose,
+            logger=self._log,
+        )
+
+        # Initialize MessageFormatter utility
+        self.message_formatter = MessageFormatter(verbose=verbose, logger=self._log)
+
         self.total_alerts = 0
         self.start_time = time.time()
         self.last_state_cleanup = time.time()
@@ -162,7 +184,7 @@ class SportsMonitor:
             logger=lambda msg: self._log_raw(msg),
         )
 
-        self.trades_log_file = Path("sports_trades.jsonl")
+        self.trades_log_file = Path("data/sports_trades.jsonl")
         self.trades_log_rotator = LogRotator(
             log_file=self.trades_log_file,
             max_bytes=self.LOG_MAX_BYTES,
@@ -242,7 +264,7 @@ class SportsMonitor:
         self.portfolio.conviction_hysteresis_pct = self.CONVICTION_HYSTERESIS_PCT
 
         # Validate wallets and log configuration
-        for wallet, name, min_shares in self.wallets:
+        for wallet, name, min_shares, _ in self.wallets:
             self.api_client.validate_wallet_address(wallet)
             filter_note = (
                 f" (filtering: {min_shares:,}+ shares only)" if min_shares else ""
@@ -289,71 +311,52 @@ class SportsMonitor:
         cutoff_time = datetime.now() - timedelta(days=7)
         removed = self.telegram.cleanup_old_messages(cutoff_time)
         if removed > 0:
-            self._log(f"[OK] Cleaned {removed} old entries (>7 days)")
+            self._log(f"[CLEANUP] Removed {removed} old entries (>7 days)")
             self._save_state()
 
-        # Count loaded messages
         message_count = len(self.telegram.messages)
-        if message_count > 0:
+        if message_count > 0 and self.verbose:
             self._log(f"[OK] Loaded {message_count} telegram message mappings")
 
-        # Load portfolio cache with TTL validation
+        # Load portfolio cache
         portfolio_data = data.get("portfolio_cache", {})
         if portfolio_data:
             self.portfolio.load_cache_from_persistence(portfolio_data)
             cache_stats = self.portfolio.get_cache_stats()
-            if cache_stats["cached_wallets"] > 0:
+            if cache_stats["cached_wallets"] > 0 and self.verbose:
                 self._log(
                     f"[OK] Loaded {cache_stats['cached_wallets']} portfolio cache entries"
                 )
 
-        # Load cumulative shares tracking (for min_shares thresholds)
-        cumulative_data = data.get("cumulative_shares", {})
-        if cumulative_data:
-            # Convert JSON string keys back to tuples
-            self.cumulative_shares = {
-                tuple(eval(k)): v for k, v in cumulative_data.items()
-            }
-            self._log(
-                f"[OK] Loaded {len(self.cumulative_shares)} cumulative share positions"
-            )
+        # Load position tracker state
+        self.position_tracker.load_from_persistence(data)
 
-        # Load threshold crossed flags
-        threshold_data = data.get("threshold_crossed", {})
-        if threshold_data:
-            # Convert JSON string keys back to tuples
-            self.threshold_crossed = {
-                tuple(eval(k)): v for k, v in threshold_data.items()
-            }
-            self._log(
-                f"[OK] Loaded {len(self.threshold_crossed)} threshold crossed flags"
-            )
+        # Migrate legacy cumulative_shares data
+        legacy_cumulative = data.get("cumulative_shares", {})
+        if legacy_cumulative and not data.get("net_positions"):
+            self.position_tracker.migrate_legacy_data(legacy_cumulative)
 
-        # Load seen transactions (deduplication)
+        # Load seen transactions
         seen_tx_data = data.get("seen_transactions", {})
         if seen_tx_data:
             for wallet, tx_list in seen_tx_data.items():
-                # Convert list back to deque with maxlen=1000
                 self.seen_transactions[wallet] = deque(tx_list, maxlen=1000)
-            total_tx = sum(len(txs) for txs in self.seen_transactions.values())
-            self._log(f"[OK] Loaded {total_tx} seen transactions across {len(seen_tx_data)} wallets")
+            if self.verbose:
+                total_tx = sum(len(txs) for txs in self.seen_transactions.values())
+                self._log(f"[OK] Loaded {total_tx} seen transactions across {len(seen_tx_data)} wallets")
 
     def _save_state(self):
         """Save state to file."""
-        # Convert tuple keys to string for JSON serialization
-        cumulative_shares_serializable = {str(k): v for k, v in self.cumulative_shares.items()}
-        threshold_crossed_serializable = {str(k): v for k, v in self.threshold_crossed.items()}
-
-        # Convert deques to lists for JSON serialization
         seen_tx_serializable = {
             wallet: list(tx_deque) for wallet, tx_deque in self.seen_transactions.items()
         }
 
+        position_state = self.position_tracker.export_for_persistence()
+
         data = {
             "telegram_messages": self.telegram.get_state_for_persistence(),
             "portfolio_cache": self.portfolio.export_cache_for_persistence(),
-            "cumulative_shares": cumulative_shares_serializable,
-            "threshold_crossed": threshold_crossed_serializable,
+            **position_state,  # Includes net_positions and threshold_crossed
             "seen_transactions": seen_tx_serializable,
         }
         self.state_manager.save(data)
@@ -375,31 +378,67 @@ class SportsMonitor:
             self._log(f"[CLEANUP] Removed {removed} old state entries (>7 days)")
             self._save_state()
 
-    def _cleanup_cumulative_shares(self):
-        """Clean up cumulative shares and threshold flags for positions no longer being tracked."""
+    def _cleanup_net_positions(self):
+        """Clean up net positions and threshold flags for positions no longer being tracked."""
         tracked_keys = set(self.telegram.messages.keys())
+        self.position_tracker.cleanup_orphaned_positions(tracked_keys)
 
-        # Clean up threshold flags for positions that are no longer tracked (7+ days old, removed from Telegram state)
-        orphaned_thresholds = set(self.threshold_crossed.keys()) - tracked_keys
-        for key in orphaned_thresholds:
-            del self.threshold_crossed[key]
+    def _reconstruct_positions_at_startup(self, trade_limit: int = 1000):
+        """
+        Reconstruct net positions from API at startup.
 
-        # Clean up cumulative shares for positions that are no longer tracked
-        # Once a position is tracked via Telegram, we keep cumulative_shares briefly in case of restarts,
-        # but remove it when the Telegram message is removed (7+ day cleanup)
-        orphaned_cumulative = set(self.cumulative_shares.keys()) - tracked_keys
-        if orphaned_cumulative:
-            for key in orphaned_cumulative:
-                del self.cumulative_shares[key]
-            if self.verbose:
-                self._log(
-                    f"[CLEANUP] Removed {len(orphaned_cumulative)} orphaned cumulative share entries"
-                )
+        Args:
+            trade_limit: Unused, kept for backwards compatibility
+        """
+        self._log("=" * 64)
+        self._log("Loading current positions from API...")
 
-        if orphaned_thresholds:
-            self._log(
-                f"[CLEANUP] Removed {len(orphaned_thresholds)} orphaned threshold flags"
-            )
+        total_positions = 0
+
+        for wallet, name, _, _ in self.wallets:
+            try:
+                reconstructed = self.api_client.reconstruct_positions_from_api(wallet)
+
+                if not reconstructed:
+                    self._log(f"  {name}: No active positions found")
+                    continue
+
+                for (market_slug, outcome), position_data in reconstructed.items():
+                    shares = position_data["shares"]
+                    usdc = position_data["usdc"]
+
+                    position_key = self.position_tracker.create_position_key(
+                        wallet, market_slug, outcome
+                    )
+
+                    if position_key not in self.position_tracker.positions:
+                        self.position_tracker.positions[position_key] = NetPosition(
+                            shares=shares, usdc=usdc
+                        )
+                        total_positions += 1
+
+                        if self.verbose:
+                            self._log(
+                                f"    {market_slug} {outcome}: {shares:.0f} shares"
+                            )
+
+                if reconstructed:
+                    self._log(
+                        f"  {name}: Loaded {len(reconstructed)} position(s)"
+                    )
+
+            except Exception as e:
+                self._log(f"  WARNING: {name}: Could not load positions: {e}")
+                if self.verbose:
+                    self._log(traceback.format_exc())
+
+        if total_positions > 0:
+            self._log(f"Successfully loaded {total_positions} total position(s)")
+            self._save_state()  # Save loaded positions
+        else:
+            self._log("No active positions found")
+
+        self._log("=" * 64)
 
     def fetch_recent_trades(self, wallet_address: str, limit: int = 50) -> List[Dict]:
         """Fetch recent trades from Data API."""
@@ -419,14 +458,14 @@ class SportsMonitor:
 
         bet = SportsBet(
             transaction_hash=tx_hash,
-            timestamp=trade_data.get("timestamp", 0),
-            side=trade_data.get("side", ""),
-            size=str(trade_data.get("size", 0)),
-            usdc_size=str(trade_data.get("usdcSize", 0)),
-            price=str(trade_data.get("price", 0)),
-            market_title=trade_data.get("title", "Unknown"),
-            market_slug=trade_data.get("slug", ""),
-            outcome=trade_data.get("outcome", "Unknown"),
+            timestamp=trade_data.get("timestamp") or 0,
+            side=trade_data.get("side") or "",
+            size=str(trade_data.get("size") or 0),
+            usdc_size=str(trade_data.get("usdcSize") or 0),
+            price=str(trade_data.get("price") or 0),
+            market_title=trade_data.get("title") or "Unknown",
+            market_slug=trade_data.get("slug") or "",
+            outcome=trade_data.get("outcome") or "Unknown",
             trader_name=trader_name,
             wallet_address=wallet_address,
         )
@@ -434,55 +473,63 @@ class SportsMonitor:
         self.seen_transactions[wallet_address].append(tx_hash)
         return bet
 
-    def _should_filter_bet(self, bet: SportsBet) -> bool:
-        """Check if bet should be filtered by min_shares threshold with cumulative tracking."""
-        min_shares = self.min_shares_by_wallet.get(bet.wallet_address.lower())
+    def _update_and_check_position(self, bet: SportsBet) -> Tuple[Optional[NetPosition], bool, str]:
+        """
+        Update position and check if should alert.
 
-        if min_shares is None:
-            return False
-
+        Returns:
+            (net_position, should_alert, reason)
+        """
         try:
-            new_shares = float(bet.size)
+            trade_shares = float(bet.size)
+            trade_usdc = float(bet.usdc_size)
         except (ValueError, TypeError):
-            return False
+            return (None, False, "invalid_trade_data")
 
-        position_key = (
-            bet.wallet_address.lower(),
-            bet.market_slug.lower(),
-            bet.outcome.upper(),
-            bet.side.upper(),
+        net_pos = self.position_tracker.update_position(
+            wallet=bet.wallet_address,
+            market_slug=bet.market_slug,
+            outcome=bet.outcome,
+            side=bet.side,
+            shares=trade_shares,
+            usdc=trade_usdc,
         )
 
-        # Position already being tracked (threshold previously crossed)
-        if self.telegram.has_tracked_message(position_key):
-            return False
-
-        # Update cumulative shares
-        current_total = self.cumulative_shares.get(position_key, 0.0)
-        new_total = current_total + new_shares
-        self.cumulative_shares[position_key] = new_total
-
-        already_crossed = self.threshold_crossed.get(position_key, False)
-
-        if new_total >= min_shares:
-            if not already_crossed:
-                self.threshold_crossed[position_key] = True
-                self._log(
-                    f"[THRESHOLD CROSSED] {bet.trader_name}: {new_total:,.0f} shares >= {min_shares:,} threshold "
-                    f"(cumulative from {current_total:,.0f})"
-                )
-            return False
-
-        if self.verbose:
-            self._log(
-                f"[FILTERED] {bet.trader_name}: {new_total:,.0f} shares < {min_shares:,} threshold (cumulative)"
+        min_shares = self.min_shares_by_wallet.get(bet.wallet_address.lower())
+        is_tracked = self.telegram.has_tracked_message(
+            self.position_tracker.create_position_key(
+                bet.wallet_address, bet.market_slug, bet.outcome
             )
-        return True
+        )
+        has_crossed = self.position_tracker.has_crossed_threshold(
+            bet.wallet_address, bet.market_slug, bet.outcome
+        )
+
+        should_alert, reason = self.message_router.should_alert_position(
+            net_pos=net_pos,
+            min_shares=min_shares,
+            is_tracked=is_tracked,
+            has_crossed_threshold=has_crossed,
+        )
+
+        if reason == "threshold_crossed":
+            self.position_tracker.mark_threshold_crossed(
+                bet.wallet_address, bet.market_slug, bet.outcome
+            )
+            self._log(
+                f"[THRESHOLD CROSSED] {bet.trader_name}: {abs(net_pos.shares):,.0f} net shares >= {min_shares:,} threshold"
+            )
+
+        if not should_alert and self.verbose:
+            self._log(f"[FILTERED] {bet.trader_name}: {reason}")
+
+        return (net_pos, should_alert, reason)
 
     def alert_bet(self, bet: SportsBet):
         """Send bet alert."""
-        # Check if bet should be filtered
-        if self._should_filter_bet(bet):
+        net_pos, should_alert, reason = self._update_and_check_position(bet)
+
+        if not should_alert or not net_pos:
             return
 
         self.total_alerts += 1
@@ -496,292 +543,311 @@ class SportsMonitor:
         )
         self._log(alert)
 
-        self._send_or_update_telegram(bet)
+        # Handle position close vs regular alert
+        if reason == "position_closed":
+            self._handle_position_close(bet, net_pos)
+        else:
+            self._handle_telegram_notification(bet, net_pos)
+
         self._log_bet(bet)
 
-    def _handle_stale_message(
-        self,
-        bet: SportsBet,
-        message_key: Tuple[str, str, str, str],
-        usdc_amount: float,
-        existing_usdc: float,
-        first_time: datetime,
-        new_update_count: int,
-        portfolio_value: Optional[float],
-    ):
-        """Handle adding to stale position (>30 min old)."""
-        new_total_usdc = existing_usdc + usdc_amount
-        conviction_label = self.portfolio.get_conviction_label(
-            new_total_usdc, portfolio_value
+    def _handle_position_close(self, bet: SportsBet, net_pos: NetPosition):
+        """Send notification when trader closes position."""
+        message_key = self.position_tracker.create_position_key(
+            bet.wallet_address, bet.market_slug, bet.outcome
         )
-
-        # Format message with total stake and context about previous position
-        message = self._format_telegram_message(
-            bet,
-            new_total_usdc,
-            datetime.fromtimestamp(bet.timestamp),
-            0,
-            is_update=False,
-            portfolio_value=portfolio_value,
-            addition_context={
-                "previous_total": existing_usdc,
-                "new_total": new_total_usdc,
-                "first_time": first_time,
-            },
-        )
-
-        # Send new message and track with total stake
-        msg_id = self.telegram.send_and_track(
-            message_key,
-            message,
-            new_total_usdc,
-            datetime.fromtimestamp(bet.timestamp),
-            conviction_label,
-        )
-
-        if msg_id:
-            self._mark_state_dirty()
-
-            if self.verbose:
-                self._log(
-                    f"[TELEGRAM] Sent new message for stale position (ID: {msg_id}, total: ${new_total_usdc:.2f})"
-                )
-
-    def _handle_existing_message(
-        self,
-        bet: SportsBet,
-        message_key: Tuple[str, str, str, str],
-        usdc_amount: float,
-        portfolio_value: Optional[float],
-    ):
-        """Update existing tracked position."""
         state = self.telegram.get_message_state(message_key)
+
         if not state:
-            # Message not tracked, treat as new
-            self._handle_new_message(bet, message_key, usdc_amount, portfolio_value)
+            if self.verbose:
+                self._log(f"[POSITION CLOSED] {bet.trader_name} (untracked)")
             return
 
-        new_total_usdc = state.total_usdc + usdc_amount
-        new_update_count = state.update_count + 1
-
-        # Check if message is stale (too old to update)
-        current_time = datetime.fromtimestamp(bet.timestamp)
-        is_stale = self.telegram.is_message_stale(state, current_time)
-
-        if is_stale:
-            self._handle_stale_message(
-                bet,
-                message_key,
-                usdc_amount,
-                state.total_usdc,
-                state.first_time,
-                new_update_count,
-                portfolio_value,
-            )
-            return
-
-        # Not stale - proceed with normal update
-        new_conviction = self.portfolio.get_conviction_label(
-            new_total_usdc, portfolio_value, state.conviction_label
+        profile_url = self.profile_url_by_wallet.get(bet.wallet_address.lower())
+        bet_info = BetInfo(
+            trader_name=bet.trader_name,
+            outcome=bet.outcome,
+            market_title=bet.market_title,
+            market_url=bet.market_url,
+            formatted_price=bet.formatted_price,
+            implied_odds=bet.implied_odds,
+            formatted_time=bet.formatted_time,
+            side=bet.side,
+            trader_profile_url=profile_url,
         )
 
-        message = self._format_telegram_message(
-            bet,
-            new_total_usdc,
-            state.first_time,
-            new_update_count,
-            is_update=True,
-            portfolio_value=portfolio_value,
+        message = self.message_formatter.format_position_close(
+            bet=bet_info,
+            net_pos=net_pos,
+            original_stake=state.total_usdc,
         )
 
-        # Try to update existing message
-        success = self.telegram.update_and_track(
-            message_key,
-            state.message_id,
-            message,
-            new_total_usdc,
-            state.first_time,
-            new_update_count,
-            new_conviction,
-            state.conviction_label,
-        )
+        max_retries = 3
+        for attempt in range(max_retries):
+            status = self.telegram.update_message(state.message_id, message)
 
-        if success:
-            self._mark_state_dirty()
-        else:
-            # Update failed (message deleted), resend as new
-            self.telegram.untrack_message(message_key)
-            self._handle_new_message(bet, message_key, usdc_amount, portfolio_value)
+            if status == UpdateStatus.SUCCESS:
+                pnl = net_pos.get_pnl()
+                pnl_display = f"+${abs(pnl):.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
+                self._log(
+                    f"[CLOSE] {bet.trader_name}: {bet.outcome} - P&L: {pnl_display}"
+                )
+                self.telegram.untrack_message(message_key)
+                self.position_tracker.reset_threshold(
+                    bet.wallet_address, bet.market_slug, bet.outcome
+                )
+                self._mark_state_dirty()
+                return
 
-    def _handle_new_message(
-        self,
-        bet: SportsBet,
-        message_key: Tuple[str, str, str, str],
-        usdc_amount: float,
-        portfolio_value: Optional[float],
-    ):
-        """Track new position."""
-        conviction_label = self.portfolio.get_conviction_label(
-            usdc_amount, portfolio_value
-        )
+            elif status == UpdateStatus.MESSAGE_DELETED:
+                self._log(f"[CLOSE] Message deleted, untracking position")
+                self.telegram.untrack_message(message_key)
+                self.position_tracker.reset_threshold(
+                    bet.wallet_address, bet.market_slug, bet.outcome
+                )
+                self._mark_state_dirty()
+                return
 
-        message = self._format_telegram_message(
-            bet,
-            usdc_amount,
-            datetime.fromtimestamp(bet.timestamp),
-            0,
-            is_update=False,
-            portfolio_value=portfolio_value,
-        )
+            elif status == UpdateStatus.NETWORK_ERROR:
+                if attempt < max_retries - 1:
+                    retry_delay = 1.0 * (attempt + 1)
+                    if self.verbose:
+                        self._log(f"[RETRY] Network error, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    self._log(f"[WARNING] Failed to update close message after {max_retries} attempts, untracking")
+                    self.telegram.untrack_message(message_key)
+                    return
 
-        msg_id = self.telegram.send_and_track(
-            message_key,
-            message,
-            usdc_amount,
-            datetime.fromtimestamp(bet.timestamp),
-            conviction_label,
-        )
+            else:
+                self._log(f"[WARNING] Unknown error updating close message, untracking")
+                self.telegram.untrack_message(message_key)
+                return
 
-        if msg_id:
-            self._mark_state_dirty()
-
-    def _send_or_update_telegram(self, bet: SportsBet):
-        """Send or update Telegram message with conviction tracking."""
+    def _handle_telegram_notification(self, bet: SportsBet, net_pos: NetPosition):
+        """Unified message handling with MessageRouter and MessageFormatter."""
         if not self.telegram.enabled:
             return
 
         try:
-            usdc_amount = float(bet.usdc_size)
-            message_key = self.telegram.create_message_key(
-                bet.wallet_address, bet.market_slug, bet.outcome, bet.side
+            message_key = self.position_tracker.create_position_key(
+                bet.wallet_address, bet.market_slug, bet.outcome
             )
 
-            # Check if we should invalidate cache early (large position change)
-            is_existing = self.telegram.has_tracked_message(message_key)
-            existing_usdc = 0
+            state = self.telegram.get_message_state(message_key)
+            state_dict = None
+            if state:
+                state_dict = {
+                    "total_usdc": state.total_usdc,
+                    "first_time": state.first_time,
+                    "update_count": state.update_count,
+                    "conviction_label": state.conviction_label,
+                    "message_id": state.message_id,
+                }
 
-            if is_existing:
-                state = self.telegram.get_message_state(message_key)
-                if state:
-                    existing_usdc = state.total_usdc
+            decision = self.message_router.decide_message_action(
+                net_pos=net_pos,
+                message_state=state_dict,
+                current_timestamp=bet.timestamp,
+            )
 
-            # If this bet is >10% of cached portfolio, invalidate cache
-            # (likely indicates deposit/withdrawal)
-            if is_existing and existing_usdc > 0:
-                should_invalidate = self.portfolio.should_invalidate_for_bet(
-                    bet.wallet_address, usdc_amount
-                )
-                if should_invalidate:
-                    self.portfolio.invalidate_cache(bet.wallet_address)
+            if decision.action == MessageAction.SKIP:
+                if self.verbose:
+                    self._log(f"[SKIP] {decision.reason}")
+                return
 
-            # Fetch portfolio value (with 1-hour cache or early invalidation)
-            portfolio_value = self.portfolio.get_portfolio_value(bet.wallet_address)
+            portfolio_value = None
+            conviction = None
+            if not decision.skip_portfolio_fetch:
+                if state and state.total_usdc > 0:
+                    should_invalidate = self.portfolio.should_invalidate_for_bet(
+                        bet.wallet_address, float(bet.usdc_size)
+                    )
+                    if should_invalidate:
+                        self.portfolio.invalidate_cache(bet.wallet_address)
 
-            # If position just crossed threshold, use cumulative total for first message
-            if not is_existing and message_key in self.cumulative_shares:
-                # Calculate cumulative USDC by converting shares to USDC
-                # Use ratio from current bet: usdc_amount / shares = price per share
-                try:
-                    shares_current = float(bet.size)
-                    if shares_current > 0:
-                        price_per_share = usdc_amount / shares_current
-                        cumulative_shares_total = self.cumulative_shares[message_key]
-                        cumulative_usdc = cumulative_shares_total * price_per_share
+                portfolio_value = self.portfolio.get_portfolio_value(bet.wallet_address)
 
-                        if self.verbose:
-                            self._log(
-                                f"[CUMULATIVE] Using cumulative total: {cumulative_shares_total:,.0f} shares = ${cumulative_usdc:.2f} "
-                                f"(current trade: {shares_current:,.0f} shares = ${usdc_amount:.2f})"
-                            )
+                display_amount = net_pos.get_display_amount()
+                if portfolio_value and portfolio_value > 0:
+                    conviction_label, conviction_pct = self.portfolio.calculate_conviction(
+                        display_amount, portfolio_value
+                    )
+                    conviction = ConvictionInfo(
+                        label=conviction_label,
+                        percentage=conviction_pct,
+                        marker=self.message_formatter.CONVICTION_MARKERS.get(conviction_label, ""),
+                    )
 
-                        usdc_amount = cumulative_usdc
-                except (ValueError, TypeError, ZeroDivisionError):
-                    pass  # Fall back to current bet amount
+            profile_url = self.profile_url_by_wallet.get(bet.wallet_address.lower())
+            bet_info = BetInfo(
+                trader_name=bet.trader_name,
+                outcome=bet.outcome,
+                market_title=bet.market_title,
+                market_url=bet.market_url,
+                formatted_price=bet.formatted_price,
+                implied_odds=bet.implied_odds,
+                formatted_time=bet.formatted_time,
+                side=bet.side,
+                trader_profile_url=profile_url,
+            )
 
-            # Route to appropriate handler
-            if is_existing:
-                self._handle_existing_message(
-                    bet, message_key, usdc_amount, portfolio_value
-                )
-            else:
-                self._handle_new_message(bet, message_key, usdc_amount, portfolio_value)
+            if decision.action == MessageAction.NEW:
+                self._send_new_message(bet_info, net_pos, message_key, portfolio_value, conviction)
+            elif decision.action == MessageAction.UPDATE:
+                self._update_message(bet_info, net_pos, message_key, state, portfolio_value, conviction)
+            elif decision.action == MessageAction.STALE_ADDITION:
+                self._send_stale_addition(bet_info, net_pos, message_key, state, portfolio_value, conviction)
 
         except requests.RequestException as e:
             self._log(f"[TELEGRAM ERROR] Failed: {e}")
         except Exception as e:
             self._log(f"[TELEGRAM EXCEPTION] {e}")
+            if self.verbose:
+                import traceback
+                self._log(traceback.format_exc())
 
-    def _format_telegram_message(
+    def _send_new_message(
         self,
-        bet: SportsBet,
-        total_usdc: float,
-        first_time: datetime,
-        update_count: int,
-        is_update: bool,
-        portfolio_value: Optional[float] = None,
-        addition_context: Optional[Dict] = None,
-    ) -> str:
-        """Format Telegram message with conviction."""
-        # Handle different header types
-        if addition_context:
-            # Stale position addition
-            time_since = (
-                datetime.fromtimestamp(bet.timestamp) - addition_context["first_time"]
-            )
-            hours = time_since.total_seconds() / 3600
-            prev_total = addition_context["previous_total"]
-            update_header = f"*[ADDING TO POSITION]*\n*Original bet:* {hours:.1f}h ago (${prev_total:.2f})\n"
-        elif is_update:
-            update_header = f"*[POSITION UPDATED x{update_count}]*\n"
-        else:
-            update_header = ""
-
-        trader_name_safe = escape_markdown(bet.trader_name)
-        outcome_safe = escape_markdown(bet.outcome)
-        market_title_safe = escape_markdown(bet.market_title)
-
-        is_fish = "Fish" in bet.trader_name
-        fade_warning = (
-            "\n\n*[!] FADE THIS TRADE - INVERSE SIGNAL [!]*" if is_fish else ""
+        bet_info: BetInfo,
+        net_pos: NetPosition,
+        message_key: Tuple[str, str, str],
+        portfolio_value: Optional[float],
+        conviction: Optional[ConvictionInfo],
+    ):
+        """Send new Telegram message for position."""
+        message = self.message_formatter.format_new_position(
+            bet=bet_info,
+            net_pos=net_pos,
+            portfolio_value=portfolio_value,
+            conviction=conviction,
         )
 
-        # Conviction indicator
-        conviction_line = ""
-        if portfolio_value and portfolio_value > 0:
-            conviction_label, conviction_pct = self.portfolio.calculate_conviction(
-                total_usdc, portfolio_value
+        display_amount = net_pos.get_display_amount()
+        conviction_label = conviction.label if conviction else "MINIMAL"
+
+        msg_id = self.telegram.send_and_track(
+            message_key,
+            message,
+            display_amount,
+            datetime.now(),
+            conviction_label,
+        )
+
+        if msg_id:
+            self._mark_state_dirty()
+            if self.verbose:
+                self._log(f"[TELEGRAM] Sent new message (ID: {msg_id}, stake: ${display_amount:.2f})")
+
+    def _update_message(
+        self,
+        bet_info: BetInfo,
+        net_pos: NetPosition,
+        message_key: Tuple[str, str, str],
+        state: any,
+        portfolio_value: Optional[float],
+        conviction: Optional[ConvictionInfo],
+    ):
+        """Update existing Telegram message with retry logic."""
+        message = self.message_formatter.format_position_update(
+            bet=bet_info,
+            net_pos=net_pos,
+            first_time=state.first_time,
+            update_count=state.update_count + 1,
+            portfolio_value=portfolio_value,
+            conviction=conviction,
+        )
+
+        display_amount = net_pos.get_display_amount()
+        new_conviction = conviction.label if conviction else "MINIMAL"
+
+        # Retry logic for network errors
+        max_retries = 3
+        for attempt in range(max_retries):
+            status = self.telegram.update_and_track(
+                message_key,
+                state.message_id,
+                message,
+                display_amount,
+                state.first_time,
+                state.update_count + 1,
+                new_conviction,
+                state.conviction_label,
             )
 
-            # ASCII conviction markers
-            conviction_marker = {
-                "EXTREME": "[!!!]",
-                "HIGH": "[!!]",
-                "MEDIUM": "[!]",
-                "LOW": "[-]",
-                "MINIMAL": "[ ]",
-            }.get(conviction_label, "")
+            if status == UpdateStatus.SUCCESS:
+                self._mark_state_dirty()
+                if self.verbose:
+                    self._log(f"[TELEGRAM] Updated message (ID: {state.message_id})")
+                return
 
-            # Note: "positions" not "portfolio" since we exclude cash balance
-            conviction_line = f"\n*Conviction:* {conviction_marker} {conviction_label} ({conviction_pct:.1f}% of positions)"
+            elif status == UpdateStatus.MESSAGE_DELETED:
+                # Message was deleted by user, send new message
+                if self.verbose:
+                    self._log(f"[TELEGRAM] Message {state.message_id} deleted, sending new message")
+                self.telegram.untrack_message(message_key)
+                self._send_new_message(bet_info, net_pos, message_key, portfolio_value, conviction)
+                return
 
-        opposite_action = ""
-        if is_fish:
-            opposite_side = "SELL" if bet.side == "BUY" else "BUY"
-            opposite_action = f"\n*Recommended Action:* {opposite_side} {outcome_safe}"
+            elif status == UpdateStatus.NETWORK_ERROR:
+                if attempt < max_retries - 1:
+                    retry_delay = 1.0 * (attempt + 1)
+                    if self.verbose:
+                        self._log(f"[RETRY] Network error, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    # Failed after retries, send new message
+                    self._log(f"[WARNING] Failed to update message after {max_retries} attempts, sending new message")
+                    self.telegram.untrack_message(message_key)
+                    self._send_new_message(bet_info, net_pos, message_key, portfolio_value, conviction)
+                    return
 
-        message = f"""{update_header}*{bet.side} {outcome_safe}*
-*Trader:* {trader_name_safe}{fade_warning}
+            else:  # UNKNOWN_ERROR
+                # Don't retry on unknown errors, send new message
+                if self.verbose:
+                    self._log(f"[TELEGRAM] Unknown error updating message, sending new message")
+                self.telegram.untrack_message(message_key)
+                self._send_new_message(bet_info, net_pos, message_key, portfolio_value, conviction)
+                return
 
-*Total Stake:* ${total_usdc:.2f} USDC{conviction_line}
-*Price:* {bet.formatted_price} (Implied: {bet.implied_odds})
-*Market:* {market_title_safe}{opposite_action}
+    def _send_stale_addition(
+        self,
+        bet_info: BetInfo,
+        net_pos: NetPosition,
+        message_key: Tuple[str, str, str],
+        state: any,
+        portfolio_value: Optional[float],
+        conviction: Optional[ConvictionInfo],
+    ):
+        """Send new message for stale position addition."""
+        message = self.message_formatter.format_stale_addition(
+            bet=bet_info,
+            net_pos=net_pos,
+            first_time=state.first_time,
+            previous_total=state.total_usdc,
+            portfolio_value=portfolio_value,
+            conviction=conviction,
+        )
 
-*First Trade:* {first_time.strftime('%I:%M:%S %p')}
-*Latest:* {bet.formatted_time}
+        display_amount = net_pos.get_display_amount()
+        conviction_label = conviction.label if conviction else "MINIMAL"
 
-[Open Market]({bet.market_url})"""
+        msg_id = self.telegram.send_and_track(
+            message_key,
+            message,
+            display_amount,
+            datetime.now(),
+            conviction_label,
+        )
 
-        return message
+        if msg_id:
+            self._mark_state_dirty()
+            if self.verbose:
+                self._log(
+                    f"[TELEGRAM] Sent stale addition message (ID: {msg_id}, total: ${display_amount:.2f})"
+                )
 
     def _log_bet(self, bet: SportsBet):
         """Log bet to JSONL with rotation."""
@@ -821,7 +887,7 @@ class SportsMonitor:
 
     def _send_startup_message(self):
         """Send startup notification."""
-        trader_list = [(name, min_shares) for _, name, min_shares in self.wallets]
+        trader_list = [(name, min_shares) for _, name, min_shares, _ in self.wallets]
         self.telegram.send_startup_message(
             num_wallets=len(self.wallets),
             poll_interval=self.poll_interval,
@@ -841,17 +907,26 @@ class SportsMonitor:
         self._send_shutdown_message()
 
         # Final state save on shutdown
-        if self.state_manager.is_dirty():
-            self._log("[SHUTDOWN] Saving final state...")
-            try:
-                self.state_manager.force_save(
-                    {
-                        "telegram_messages": self.telegram.get_state_for_persistence(),
-                        "portfolio_cache": self.portfolio.export_cache_for_persistence(),
-                    }
-                )
-            except Exception as e:
-                self._log(f"[SHUTDOWN ERROR] Failed to save state: {e}")
+        self._log("[SHUTDOWN] Saving final state...")
+        try:
+            # Convert deques to lists for JSON serialization
+            seen_tx_serializable = {
+                wallet: list(tx_deque) for wallet, tx_deque in self.seen_transactions.items()
+            }
+
+            # Get position tracker state
+            position_state = self.position_tracker.export_for_persistence()
+
+            self.state_manager.force_save(
+                {
+                    "telegram_messages": self.telegram.get_state_for_persistence(),
+                    "portfolio_cache": self.portfolio.export_cache_for_persistence(),
+                    **position_state,  # Includes net_positions and threshold_crossed
+                    "seen_transactions": seen_tx_serializable,
+                }
+            )
+        except Exception as e:
+            self._log(f"[SHUTDOWN ERROR] Failed to save state: {e}")
 
         self._cleanup_resources()
         self._log("[SHUTDOWN] Cleanup complete, exiting")
@@ -873,7 +948,7 @@ class SportsMonitor:
         self._log("=" * 64)
         self._log("Loading recent bets to establish baseline...")
 
-        for wallet, name, _ in self.wallets:
+        for wallet, name, _, _ in self.wallets:
             try:
                 initial_trades = self.fetch_recent_trades(wallet, limit=100)
                 for trade in initial_trades:
@@ -887,6 +962,10 @@ class SportsMonitor:
                 self._log(f"  WARNING: {name}: Could not load baseline: {e}")
 
         self._log("=" * 64)
+
+        # Reconstruct positions from historical trades
+        self._reconstruct_positions_at_startup(trade_limit=1000)
+
         self._log("MONITORING ACTIVE - Waiting for new bets...")
         print(
             f"\nMonitoring {len(self.wallets)} traders. Check {self.log_file} for output.\n"
@@ -899,7 +978,7 @@ class SportsMonitor:
                 all_new_bets = []
 
                 def fetch_wallet_trades(wallet_info):
-                    wallet, name, _ = wallet_info
+                    wallet, name, _, _ = wallet_info
                     wallet_bets = []
                     try:
                         trades = self.fetch_recent_trades(wallet, limit=30)
@@ -942,14 +1021,17 @@ class SportsMonitor:
                     current_time - self.last_shares_cleanup
                     > self.STATE_CLEANUP_INTERVAL_SECONDS
                 ):
-                    self._cleanup_cumulative_shares()
+                    self._cleanup_net_positions()
                     self.last_shares_cleanup = current_time
 
                 # Final state save at end of poll if dirty
                 if self.state_manager.is_dirty():
                     self._save_state()
 
-                if self.verbose:
+                # Reduced logging: only log every 10 polls or when verbose
+                self._poll_count += 1
+
+                if self.verbose or self._poll_count % 10 == 0:
                     uptime = int(time.time() - self.start_time)
                     self._log(
                         f"[{datetime.now().strftime('%H:%M:%S')}] Poll complete | "
@@ -963,21 +1045,6 @@ class SportsMonitor:
                 if self.verbose:
                     self._log(traceback.format_exc())
                 time.sleep(self.poll_interval)
-
-    def _print_summary(self):
-        """Print summary."""
-        uptime = int(time.time() - self.start_time)
-        summary = f"""
-{'=' * 64}
-SESSION SUMMARY
-{'=' * 64}
-Total Bets Alerted:  {self.total_alerts}
-Session Duration:    {uptime // 60}m {uptime % 60}s
-Traders Monitored:   {len(self.wallets)}
-{'=' * 64}
-"""
-        self._log(summary)
-        print(summary)
 
 
 def main():
@@ -1042,8 +1109,8 @@ Examples:
     parser.add_argument(
         "--log-file",
         "-l",
-        default="sports_monitor.log",
-        help="Log file path (default: sports_monitor.log)",
+        default="data/sports_monitor.log",
+        help="Log file path (default: data/sports_monitor.log)",
     )
 
     parser.add_argument(
@@ -1053,8 +1120,8 @@ Examples:
 
     parser.add_argument(
         "--state-file",
-        default="sports_monitor_state.json",
-        help="State file path (default: sports_monitor_state.json)",
+        default="data/sports_monitor_state.json",
+        help="State file path (default: data/sports_monitor_state.json)",
     )
 
     args = parser.parse_args()
@@ -1069,6 +1136,7 @@ Examples:
                     address = wallet_config.get("address", "").strip()
                     name = wallet_config.get("name", "Unknown").strip()
                     min_shares = wallet_config.get("min_shares")
+                    profile_url = wallet_config.get("profile_url")
 
                     # Validate min_shares
                     if min_shares is not None:
@@ -1078,14 +1146,14 @@ Examples:
                             raise ValueError(f"min_shares must be non-negative for {name}, got {min_shares}")
 
                     if address:
-                        wallets.append((address, name, min_shares))
+                        wallets.append((address, name, min_shares, profile_url))
             print(f"Loaded {len(wallets)} wallet(s) from {args.config}")
         except Exception as e:
             print(f"ERROR: Failed to load config file: {e}")
             return
 
     elif args.wallet:
-        wallets = [(args.wallet, args.name, None)]
+        wallets = [(args.wallet, args.name, None, None)]
 
     else:
         parser.error("Must provide either --config or --wallet")

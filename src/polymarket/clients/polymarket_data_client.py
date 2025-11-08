@@ -127,33 +127,6 @@ class PolymarketDataClient:
             )
             return None
 
-    def fetch_market(self, condition_id: str) -> Optional[Dict]:
-        """Fetch market by condition ID."""
-        url = f"{self.base_url}/markets/{condition_id}"
-
-        try:
-            response = self.session.get(url, timeout=self.timeout)
-            response.raise_for_status()
-
-            market = response.json()
-
-            if self.verbose:
-                self.logger(f"[API] Fetched market {condition_id}")
-
-            return market
-
-        except requests.HTTPError as e:
-            self.logger(
-                f"[API ERROR] HTTP {e.response.status_code if e.response else 'Unknown'} for market {condition_id}"
-            )
-            return None
-        except requests.RequestException as e:
-            self.logger(f"[API ERROR] Request failed for market {condition_id}: {e}")
-            return None
-        except Exception as e:
-            self.logger(f"[API ERROR] Unexpected error for market {condition_id}: {e}")
-            return None
-
     def validate_wallet_address(self, wallet_address: str) -> bool:
         """Validate wallet address format."""
         if not wallet_address.startswith("0x"):
@@ -186,10 +159,137 @@ class PolymarketDataClient:
         """Context manager exit."""
         self.close()
 
-    def get_stats(self) -> Dict:
-        """Get client statistics."""
-        return {
-            "base_url": self.base_url,
-            "timeout": self.timeout,
-            "session_active": self.session is not None,
+    def reconstruct_positions_from_api(self, wallet_address: str) -> Dict:
+        """
+        Reconstruct positions from the /positions API endpoint.
+
+        This is more reliable than reconstructing from trades, as it captures
+        ALL current positions regardless of how long ago they were opened.
+
+        Returns dict with structure:
+        {
+            (market_slug, outcome): {
+                "shares": float,
+                "usdc": float,  # Estimated value based on current size
+                "trade_count": 0  # Unknown from positions endpoint
+            }
         }
+        """
+        positions_data = self.fetch_positions(wallet_address)
+
+        if not positions_data:
+            return {}
+
+        positions = {}
+
+        for position in positions_data:
+            try:
+                # Positions endpoint returns 'slug' for market identifier
+                market_slug = position.get("slug")
+                outcome = position.get("outcome")
+                size = float(position.get("size", 0))
+                initial_value = float(position.get("initialValue", 0))
+
+                if not all([market_slug, outcome]) or size < 1.0:
+                    continue
+
+                # Normalize outcome to uppercase
+                outcome = outcome.upper()
+
+                # Create position key
+                key = (market_slug, outcome)
+
+                # Use actual investment amount from API
+                positions[key] = {
+                    "shares": size,
+                    "usdc": initial_value,  # Actual USDC invested
+                    "trade_count": 0  # Unknown from positions endpoint
+                }
+
+            except (ValueError, TypeError, KeyError) as e:
+                self.logger(f"[API ERROR] Failed to parse position: {e}")
+                continue
+
+        if positions:
+            self.logger(
+                f"[API] Loaded {len(positions)} active positions from API"
+            )
+
+        return positions
+
+    def reconstruct_positions_from_trades(
+        self, wallet_address: str, limit: int = 1000
+    ) -> Dict:
+        """
+        Reconstruct net positions from historical trades.
+
+        Returns dict with structure:
+        {
+            (market_slug, outcome): {
+                "shares": float,  # Net shares (BUY adds, SELL subtracts)
+                "usdc": float,    # Net USDC invested
+                "trade_count": int
+            }
+        }
+        """
+        trades = self.fetch_recent_trades(
+            wallet_address, limit=limit, sort_by="TIMESTAMP", sort_direction="DESC"
+        )
+
+        if not trades:
+            return {}
+
+        positions = {}
+        skipped_trades = 0
+
+        for trade in trades:
+            try:
+                # API returns 'slug' for market identifier, not 'market'
+                market_slug = trade.get("slug") or trade.get("market")
+                outcome = trade.get("outcome")
+                side = trade.get("side")
+                size = float(trade.get("size", 0))
+                price = float(trade.get("price", 0))
+
+                if not all([market_slug, outcome, side]):
+                    skipped_trades += 1
+                    continue
+
+                # Normalize outcome to uppercase
+                outcome = outcome.upper()
+
+                # Create position key
+                key = (market_slug, outcome)
+
+                if key not in positions:
+                    positions[key] = {"shares": 0.0, "usdc": 0.0, "trade_count": 0}
+
+                # Calculate USDC amount for this trade
+                usdc_amount = size * price
+
+                # Update net position (BUY adds, SELL subtracts)
+                if side.upper() == "BUY":
+                    positions[key]["shares"] += size
+                    positions[key]["usdc"] += usdc_amount
+                elif side.upper() == "SELL":
+                    positions[key]["shares"] -= size
+                    positions[key]["usdc"] -= usdc_amount
+
+                positions[key]["trade_count"] += 1
+
+            except (ValueError, TypeError, KeyError) as e:
+                self.logger(f"[API ERROR] Failed to parse trade: {e}")
+                skipped_trades += 1
+                continue
+
+        # Filter out closed positions (< 1 share)
+        active_positions = {
+            k: v for k, v in positions.items() if abs(v["shares"]) >= 1.0
+        }
+
+        if active_positions:
+            self.logger(
+                f"[API] Reconstructed {len(active_positions)} active positions from {len(trades)} trades"
+            )
+
+        return active_positions

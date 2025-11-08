@@ -116,30 +116,3 @@ class LogRotator:
                     break
         except Exception as e:
             self.logger(f"[LOG CLEANUP ERROR] {e}")
-
-    def get_stats(self) -> dict:
-        """Get rotation statistics."""
-        stats = {
-            "log_file": str(self.log_file),
-            "exists": self.log_file.exists(),
-            "max_bytes": self.max_bytes,
-            "backup_count": self.backup_count,
-            "rotation_time_seconds": self.rotation_time_seconds,
-        }
-
-        if self.log_file.exists():
-            try:
-                stats["current_size"] = self.log_file.stat().st_size
-            except OSError:
-                stats["current_size"] = None
-
-        # Count existing backups
-        backup_files = []
-        for i in range(1, self.backup_count + 1):
-            backup = self.log_file.with_suffix(f"{self.log_file.suffix}.{i}")
-            if backup.exists():
-                backup_files.append(str(backup))
-
-        stats["existing_backups"] = len(backup_files)
-
-        return stats

@@ -5,8 +5,17 @@ import json
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Dict, Optional, Tuple, Callable
 import requests
+
+
+class UpdateStatus(Enum):
+    """Status of a message update attempt."""
+    SUCCESS = "success"  # Update succeeded
+    MESSAGE_DELETED = "deleted"  # Message was deleted by user
+    NETWORK_ERROR = "network_error"  # Transient network/API error (should retry)
+    UNKNOWN_ERROR = "unknown"  # Other error
 
 
 def escape_markdown(text: str) -> str:
@@ -59,19 +68,19 @@ class TelegramNotifier:
         self.logger = logger or (lambda msg: None)
         self.enabled = bool(bot_token and chat_id)
 
-        # Message tracking: key -> MessageState
-        self.messages: Dict[Tuple[str, str, str, str], MessageState] = {}
+        # Message tracking: key -> MessageState (3-tuple: wallet, market, outcome)
+        # Note: SIDE is excluded to track NET position across BUY and SELL
+        self.messages: Dict[Tuple[str, str, str], MessageState] = {}
         self._lock = threading.Lock()
 
     def create_message_key(
-        self, wallet: str, market_slug: str, outcome: str, side: str
-    ) -> Tuple[str, str, str, str]:
-        """Create normalized tracking key."""
+        self, wallet: str, market_slug: str, outcome: str
+    ) -> Tuple[str, str, str]:
+        """Create normalized tracking key (3-tuple: wallet, market, outcome)."""
         return (
             wallet.lower(),
             market_slug.lower(),
             outcome.upper(),
-            side.upper(),
         )
 
     def send_message(self, text: str) -> Optional[int]:
@@ -84,7 +93,7 @@ class TelegramNotifier:
             "chat_id": self.chat_id,
             "text": text,
             "parse_mode": "Markdown",
-            "disable_web_page_preview": False,
+            "disable_web_page_preview": True,
         }
 
         try:
@@ -111,10 +120,15 @@ class TelegramNotifier:
             self.logger(f"[TELEGRAM ERROR] Failed to send message: {e}")
             return None
 
-    def update_message(self, message_id: int, text: str) -> bool:
-        """Update existing message."""
+    def update_message(self, message_id: int, text: str) -> UpdateStatus:
+        """
+        Update existing message.
+
+        Returns:
+            UpdateStatus indicating success or specific failure type
+        """
         if not self.enabled:
-            return False
+            return UpdateStatus.UNKNOWN_ERROR
 
         url = f"https://api.telegram.org/bot{self.bot_token}/editMessageText"
         payload = {
@@ -122,30 +136,73 @@ class TelegramNotifier:
             "message_id": message_id,
             "text": text,
             "parse_mode": "Markdown",
-            "disable_web_page_preview": False,
+            "disable_web_page_preview": True,
         }
 
         try:
             response = self.session.post(url, json=payload, timeout=10)
             response.raise_for_status()
-            return True
+            return UpdateStatus.SUCCESS
 
         except requests.HTTPError as e:
-            if e.response and e.response.status_code == 400:
-                self.logger(
-                    f"[TELEGRAM] Message {message_id} no longer exists (deleted by user)"
-                )
-                return False
+            if e.response:
+                status_code = e.response.status_code
+
+                # Handle 400 errors (bad request)
+                if status_code == 400:
+                    # Check specific error type from description
+                    try:
+                        error_data = e.response.json()
+                        description = error_data.get("description", "").lower()
+
+                        # Message content unchanged - treat as success
+                        if "message is not modified" in description:
+                            if self.verbose:
+                                self.logger(
+                                    f"[TELEGRAM] Message {message_id} unchanged (skipped update)"
+                                )
+                            return UpdateStatus.SUCCESS
+
+                        # Message deleted by user
+                        elif "message to edit not found" in description or "message not found" in description:
+                            self.logger(
+                                f"[TELEGRAM] Message {message_id} no longer exists (deleted by user)"
+                            )
+                            return UpdateStatus.MESSAGE_DELETED
+
+                    except (json.JSONDecodeError, KeyError, AttributeError):
+                        # Can't parse error details, treat as unknown
+                        pass
+
+                    # Other 400 errors (bad request, invalid markdown, etc)
+                    self.logger(f"[TELEGRAM ERROR] Bad request for message {message_id}: {e}")
+                    return UpdateStatus.UNKNOWN_ERROR
+
+                # Rate limit or server errors (should retry)
+                elif status_code in [429, 500, 502, 503, 504]:
+                    self.logger(
+                        f"[TELEGRAM ERROR] Transient error ({status_code}) for message {message_id}: {e}"
+                    )
+                    return UpdateStatus.NETWORK_ERROR
+
+                else:
+                    self.logger(f"[TELEGRAM ERROR] HTTP {status_code} for message {message_id}: {e}")
+                    return UpdateStatus.UNKNOWN_ERROR
             else:
-                self.logger(f"[TELEGRAM ERROR] Failed to update message: {e}")
-                return False
+                self.logger(f"[TELEGRAM ERROR] Failed to update message {message_id}: {e}")
+                return UpdateStatus.NETWORK_ERROR
+
+        except requests.Timeout as e:
+            self.logger(f"[TELEGRAM ERROR] Timeout updating message {message_id}: {e}")
+            return UpdateStatus.NETWORK_ERROR
+
         except requests.RequestException as e:
-            self.logger(f"[TELEGRAM ERROR] Failed to update message: {e}")
-            return False
+            self.logger(f"[TELEGRAM ERROR] Network error updating message {message_id}: {e}")
+            return UpdateStatus.NETWORK_ERROR
 
     def track_message(
         self,
-        key: Tuple[str, str, str, str],
+        key: Tuple[str, str, str],
         message_id: int,
         usdc_amount: float,
         timestamp: datetime,
@@ -163,7 +220,7 @@ class TelegramNotifier:
 
     def update_tracked_message(
         self,
-        key: Tuple[str, str, str, str],
+        key: Tuple[str, str, str],
         message_id: int,
         new_total_usdc: float,
         first_time: datetime,
@@ -181,18 +238,18 @@ class TelegramNotifier:
             )
 
     def get_message_state(
-        self, key: Tuple[str, str, str, str]
+        self, key: Tuple[str, str, str]
     ) -> Optional[MessageState]:
         """Get tracked message state (thread-safe)."""
         with self._lock:
             return self.messages.get(key)
 
-    def has_tracked_message(self, key: Tuple[str, str, str, str]) -> bool:
+    def has_tracked_message(self, key: Tuple[str, str, str]) -> bool:
         """Check if message is tracked."""
         with self._lock:
             return key in self.messages
 
-    def untrack_message(self, key: Tuple[str, str, str, str]):
+    def untrack_message(self, key: Tuple[str, str, str]):
         """Remove message from tracking."""
         with self._lock:
             if key in self.messages:
@@ -205,7 +262,7 @@ class TelegramNotifier:
 
     def send_and_track(
         self,
-        key: Tuple[str, str, str, str],
+        key: Tuple[str, str, str],
         text: str,
         usdc_amount: float,
         timestamp: datetime,
@@ -226,7 +283,7 @@ class TelegramNotifier:
 
     def update_and_track(
         self,
-        key: Tuple[str, str, str, str],
+        key: Tuple[str, str, str],
         message_id: int,
         text: str,
         new_total_usdc: float,
@@ -234,11 +291,16 @@ class TelegramNotifier:
         new_update_count: int,
         new_conviction: str,
         last_conviction: str,
-    ) -> bool:
-        """Update message and track the new state."""
-        success = self.update_message(message_id, text)
+    ) -> UpdateStatus:
+        """
+        Update message and track the new state.
 
-        if success:
+        Returns:
+            UpdateStatus indicating success or specific failure type
+        """
+        status = self.update_message(message_id, text)
+
+        if status == UpdateStatus.SUCCESS:
             self.update_tracked_message(
                 key,
                 message_id,
@@ -258,7 +320,7 @@ class TelegramNotifier:
                     f"[TELEGRAM] Updated message {message_id} (total: ${new_total_usdc:.2f}){conviction_note}"
                 )
 
-        return success
+        return status
 
     def send_startup_message(
         self, num_wallets: int, poll_interval: int, trader_list: list

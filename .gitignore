@@ -3,9 +3,8 @@
 *.pem
 src/kalshi/tools/hotkeys.json
 scripts/tail-stupidity.sh
-scripts/tail-sharp-traders.sh
+scripts/tail-sharps.sh
 config/trader_list.json
-deployment/
 
 # Python
 __pycache__/
@@ -47,12 +46,10 @@ env/
 Thumbs.db
 
 # Logs & Runtime Data
-*.log
+data/
 *.csv
 *.jsonl
 polymarket_activity_log.jsonl
-sports_monitor_state.json
-stupidity_state.json
 
 # Generated Data Files
 # Ignore trading/market data JSONs

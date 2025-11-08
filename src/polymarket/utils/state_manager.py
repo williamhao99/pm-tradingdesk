@@ -130,20 +130,6 @@ class StateManager:
         time_since_last_save = current_time - self._last_save
         return time_since_last_save >= self.debounce_seconds
 
-    def save_if_dirty(self, data: Dict[str, Any]) -> bool:
-        """
-        Save state if dirty and debounce window has passed.
-
-        Args:
-            data: State data to save
-
-        Returns:
-            True if saved, False otherwise
-        """
-        if self.should_save():
-            return self.save(data, force=False)
-        return False
-
     def force_save(self, data: Dict[str, Any]) -> bool:
         """
         Force immediate save (skip debouncing).
@@ -155,39 +141,3 @@ class StateManager:
             True if successful, False otherwise
         """
         return self.save(data, force=True)
-
-    def backup(self, suffix: str = ".backup") -> bool:
-        """
-        Create a backup copy of the state file.
-
-        Args:
-            suffix: Backup file suffix (default: .backup)
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if not self.state_file.exists():
-            return False
-
-        try:
-            backup_file = self.state_file.with_suffix(self.state_file.suffix + suffix)
-            backup_file.write_text(self.state_file.read_text())
-
-            if self.verbose:
-                self.logger(f"[STATE] Backed up to {backup_file}")
-
-            return True
-
-        except Exception as e:
-            self.logger(f"[STATE ERROR] Backup failed: {e}")
-            return False
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get state manager statistics."""
-        return {
-            "state_file": str(self.state_file),
-            "exists": self.state_file.exists(),
-            "dirty": self._dirty,
-            "debounce_seconds": self.debounce_seconds,
-            "time_since_last_save": time.time() - self._last_save,
-        }

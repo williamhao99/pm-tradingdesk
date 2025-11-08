@@ -195,25 +195,6 @@ class PortfolioTracker:
 
         return (new_label, pct)
 
-    def get_conviction_label(
-        self,
-        bet_size_usdc: float,
-        portfolio_value: Optional[float],
-        last_conviction: str = "",
-    ) -> str:
-        """
-        Get conviction label (wrapper to avoid None checks everywhere).
-
-        Returns "UNKNOWN" if portfolio_value is None or <= 0.
-        """
-        if not portfolio_value or portfolio_value <= 0:
-            return "UNKNOWN"
-
-        conviction_label, _ = self.calculate_conviction(
-            bet_size_usdc, portfolio_value, last_conviction
-        )
-        return conviction_label
-
     def get_cache_stats(self) -> Dict[str, int]:
         """Get cache statistics."""
         with self._lock:
