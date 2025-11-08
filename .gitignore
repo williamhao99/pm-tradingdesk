@@ -5,6 +5,7 @@ src/kalshi/tools/hotkeys.json
 scripts/tail-stupidity.sh
 scripts/tail-sharps.sh
 config/trader_list.json
+config/stupidity_config.json
 
 # Python
 __pycache__/

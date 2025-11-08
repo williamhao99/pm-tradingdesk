@@ -123,6 +123,7 @@ class SportsMonitor:
         verbose: bool = False,
         log_file: str = "data/sports_monitor.log",
         state_file: str = "data/sports_monitor_state.json",
+        trades_log_file: str = "data/sports_trades.jsonl",
         telegram_chat_id: Optional[str] = None,
     ):
         # Store wallets with (address, name, min_shares, profile_url)
@@ -145,6 +146,7 @@ class SportsMonitor:
         self.verbose = verbose
         self.log_file = Path(log_file)
         self.state_file = Path(state_file)
+        self.trades_log_file = Path(trades_log_file)
 
         Path("data").mkdir(parents=True, exist_ok=True)
 
@@ -184,7 +186,6 @@ class SportsMonitor:
             logger=lambda msg: self._log_raw(msg),
         )
 
-        self.trades_log_file = Path("data/sports_trades.jsonl")
         self.trades_log_rotator = LogRotator(
             log_file=self.trades_log_file,
             max_bytes=self.LOG_MAX_BYTES,
@@ -1124,6 +1125,12 @@ Examples:
         help="State file path (default: data/sports_monitor_state.json)",
     )
 
+    parser.add_argument(
+        "--trades-log-file",
+        default="data/sports_trades.jsonl",
+        help="Trades log file path (default: data/sports_trades.jsonl)",
+    )
+
     args = parser.parse_args()
 
     wallets = []
@@ -1168,6 +1175,7 @@ Examples:
         verbose=args.verbose,
         log_file=args.log_file,
         state_file=args.state_file,
+        trades_log_file=args.trades_log_file,
         telegram_chat_id=args.telegram_chat_id,
     )
 
