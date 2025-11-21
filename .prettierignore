@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+venv/
+.venv/
+
+# Build outputs
+dist/
+build/
+*.pyc
+__pycache__/
+
+# IDE
+.vscode/
+.idea/
+
+# Git
+.git/
+
+# Logs
+*.log
+
+# API documentation (don't reformat)
+api-documentation/*.yaml
+api-documentation/*.json
+
+# Environment
+.env

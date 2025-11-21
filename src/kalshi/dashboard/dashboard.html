@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <title>Kalshi Trading Dashboard</title>
+    <meta
+      name="description"
+      content="High-performance Kalshi trading dashboard with WebSocket compression"
+    />
+    <link
+      rel="preconnect"
+      href="https://api.elections.kalshi.com"
+    />
+    <link
+      rel="preconnect"
+      href="https://cdn.jsdelivr.net"
+    />
+    <link
+      rel="dns-prefetch"
+      href="https://cdn.jsdelivr.net"
+    />
+    <link
+      rel="stylesheet"
+      href="/static/styles.css"
+    />
+  </head>
+  <body>
+    <div class="container">
+      <!-- Header -->
+      <header>
+        <h1>Kalshi Trading</h1>
+        <div class="tab-navigation">
+          <button
+            class="tab-btn active"
+            onclick="switchTab('dashboard', event)"
+          >
+            Dashboard
+          </button>
+          <button
+            class="tab-btn"
+            onclick="switchTab('positions', event)"
+          >
+            Positions
+          </button>
+          <button
+            class="tab-btn"
+            onclick="switchTab('analytics', event)"
+          >
+            Analytics
+          </button>
+        </div>
+        <div class="status-bar">
+          <div class="status-item">
+            <div class="status-label">Portfolio</div>
+            <div
+              class="status-value portfolio"
+              id="portfolio-value"
+            >
+              $0.00
+            </div>
+          </div>
+          <div class="status-item">
+            <div class="status-label">Positions</div>
+            <div
+              class="status-value positions"
+              id="positions-value"
+            >
+              $0.00
+            </div>
+          </div>
+          <div class="status-item">
+            <div class="status-label">Cash</div>
+            <div
+              class="status-value balance"
+              id="balance"
+            >
+              $0.00
+            </div>
+          </div>
+          <div class="connection-indicator">
+            <div
+              class="connection-status"
+              id="status"
+            ></div>
+          </div>
+        </div>
+      </header>
+
+      <!-- Dashboard Tab -->
+      <div
+        id="dashboard-tab"
+        class="tab-content active"
+      >
+        <div class="dashboard-grid">
+          <!-- Place Order Card -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Place Order</div>
+            </div>
+            <div class="card-content">
+              <div class="form-group">
+                <label>Market Ticker</label>
+                <input
+                  type="text"
+                  id="market-ticker"
+                  placeholder="e.g., KXGOVSHUTLENGTH-26JAN01-35D"
+                  autocomplete="off"
+                />
+                <div class="help-text">Press Enter to lookup ticker</div>
+                <div
+                  id="ticker-lookup-status"
+                  class="status-text"
+                ></div>
+              </div>
+
+              <div id="orderbook-info"></div>
+
+              <!-- Market Orders -->
+              <div
+                id="market-orders-section"
+                class="trading-section"
+              >
+                <div class="section-header">Market Order</div>
+                <div class="grid grid-cols-2 gap-2 mb-2">
+                  <div class="side-header yes">BUY YES</div>
+                  <div class="side-header no">BUY NO</div>
+                </div>
+                <div class="grid grid-cols-4 gap-2">
+                  <button
+                    class="btn-market yes"
+                    onclick="quickMarketOrder('buy', 'yes', 1)"
+                  >
+                    ×1
+                  </button>
+                  <button
+                    class="btn-market yes"
+                    onclick="quickMarketOrder('buy', 'yes', 10)"
+                  >
+                    ×10
+                  </button>
+                  <button
+                    class="btn-market no"
+                    onclick="quickMarketOrder('buy', 'no', 1)"
+                  >
+                    ×1
+                  </button>
+                  <button
+                    class="btn-market no"
+                    onclick="quickMarketOrder('buy', 'no', 10)"
+                  >
+                    ×10
+                  </button>
+                  <button
+                    class="btn-market yes"
+                    onclick="quickMarketOrder('buy', 'yes', 50)"
+                  >
+                    ×50
+                  </button>
+                  <button
+                    class="btn-market yes"
+                    onclick="quickMarketOrder('buy', 'yes', 100)"
+                  >
+                    ×100
+                  </button>
+                  <button
+                    class="btn-market no"
+                    onclick="quickMarketOrder('buy', 'no', 50)"
+                  >
+                    ×50
+                  </button>
+                  <button
+                    class="btn-market no"
+                    onclick="quickMarketOrder('buy', 'no', 100)"
+                  >
+                    ×100
+                  </button>
+                </div>
+              </div>
+
+              <div class="divider"></div>
+
+              <!-- Limit Orders -->
+              <div
+                id="limit-orders-section"
+                class="trading-section"
+              >
+                <div class="section-header">Limit Order</div>
+                <div class="grid grid-cols-4 gap-2 mb-2">
+                  <div class="label-header col-span-2">Action, Side</div>
+                  <div class="label-header">Count</div>
+                  <div class="label-header">Price ¢</div>
+                </div>
+                <div class="grid grid-cols-4 gap-2 mb-2">
+                  <button
+                    type="button"
+                    class="btn-market btn-toggle active"
+                    data-action="buy"
+                    onclick="window.toggleAction('buy')"
+                  >
+                    Buy
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-market btn-toggle"
+                    data-action="sell"
+                    onclick="window.toggleAction('sell')"
+                  >
+                    Sell
+                  </button>
+                  <input
+                    type="number"
+                    class="compact"
+                    id="limit-count"
+                    min="1"
+                    value="1"
+                    oninput="window.updateLimitOrderButton()"
+                  />
+                  <input
+                    type="number"
+                    class="compact"
+                    id="limit-price"
+                    min="1"
+                    max="99"
+                    placeholder="Enter price"
+                    oninput="window.updateLimitOrderButton()"
+                  />
+                </div>
+                <div class="grid grid-cols-4 gap-2 mt-2">
+                  <button
+                    type="button"
+                    class="btn-market btn-toggle active"
+                    data-side="yes"
+                    onclick="window.toggleSide('yes')"
+                  >
+                    YES
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-market btn-toggle"
+                    data-side="no"
+                    onclick="window.toggleSide('no')"
+                  >
+                    NO
+                  </button>
+                  <button
+                    type="button"
+                    id="place-limit-order-btn"
+                    class="col-span-2"
+                    onclick="window.placeLimitOrder()"
+                  >
+                    Place Limit Order
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Recent Fills Card -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Recent Fills</div>
+              <div class="card-actions">
+                <button
+                  class="small secondary"
+                  onclick="loadFills(event)"
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+            <div class="card-content list-container">
+              <div id="fills-list"></div>
+            </div>
+          </div>
+
+          <!-- Resting Orders Card -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Resting Orders</div>
+              <div class="card-actions">
+                <button
+                  class="small secondary"
+                  onclick="loadOrders('resting', event)"
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+            <div class="card-content list-container">
+              <div id="orders-list"></div>
+            </div>
+          </div>
+
+          <!-- Trading Bots Card -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Hotkey Trading Bot</div>
+              <div class="card-actions">
+                <button
+                  id="bot-toggle-btn"
+                  class="small secondary"
+                  onclick="client.toggleHotkeyBot()"
+                >
+                  Activate
+                </button>
+              </div>
+            </div>
+            <div class="card-content">
+              <!-- Hotkey Generator Form -->
+              <div
+                style="
+                  border-bottom: 1px solid var(--border);
+                  padding-bottom: 16px;
+                  margin-bottom: 16px;
+                "
+              >
+                <div class="form-group">
+                  <label>Series Ticker</label>
+                  <input
+                    type="text"
+                    id="series-ticker-input"
+                    placeholder="e.g., KXGOVSHUTLENGTH"
+                    autocomplete="off"
+                    onkeypress="if(event.key === 'Enter') client.generateHotkeys()"
+                  />
+                  <div class="help-text">Press Enter to generate hotkeys</div>
+                  <div
+                    id="generator-status"
+                    class="status-text"
+                  ></div>
+                </div>
+                <div
+                  class="form-group"
+                  style="margin-bottom: 0"
+                >
+                  <label>Share Count Per Click</label>
+                  <div style="display: flex; gap: 8px">
+                    <input
+                      type="number"
+                      id="share-count-input"
+                      placeholder="200"
+                      value="200"
+                      min="1"
+                      style="flex: 1"
+                    />
+                    <button onclick="client.generateHotkeys()">
+                      Generate Hotkeys
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div
+                id="bot-status"
+                style="margin-bottom: 16px; text-align: center"
+              >
+                <div style="color: var(--text-muted); font-size: 13px">
+                  Status:
+                  <span id="bot-status-text">Offline</span>
+                </div>
+                <div
+                  id="bot-market-title"
+                  style="
+                    color: var(--text);
+                    font-size: 14px;
+                    font-weight: 600;
+                    margin-top: 8px;
+                  "
+                ></div>
+                <div
+                  id="bot-stats"
+                  style="
+                    color: var(--text-muted);
+                    font-size: 12px;
+                    margin-top: 4px;
+                  "
+                ></div>
+              </div>
+              <div
+                id="bot-hotkeys-grid"
+                class="hotkeys-grid"
+              >
+                <div class="empty-state">Activate bot to use hotkeys</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Positions Tab -->
+      <div
+        id="positions-tab"
+        class="tab-content"
+      >
+        <div class="dashboard-grid single-column">
+          <div class="card card-height-positions">
+            <div class="card-header">
+              <div class="card-title">Current Positions</div>
+              <div class="card-actions">
+                <button
+                  class="small secondary"
+                  onclick="loadPositions(event)"
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+            <div class="card-content list-container">
+              <div id="positions-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Analytics Tab -->
+      <div
+        id="analytics-tab"
+        class="tab-content"
+      >
+        <div class="dashboard-grid single-column">
+          <!-- Overall Stats -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Trading Activity</div>
+              <div class="card-actions">
+                <button
+                  class="small secondary"
+                  onclick="client.takeSnapshot()"
+                  title="Manually save a snapshot now"
+                >
+                  Take Snapshot
+                </button>
+                <button
+                  class="small secondary"
+                  onclick="client.ui.loadAnalytics()"
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+            <div class="card-content">
+              <div id="analytics-overall">
+                <div class="empty-state">Loading analytics...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Portfolio History -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Portfolio History (Last 30 Days)</div>
+            </div>
+            <div class="card-content">
+              <div style="position: relative; height: 400px">
+                <canvas id="portfolio-chart"></canvas>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div
+      class="toast-container"
+      id="toast-container"
+    ></div>
+
+    <!-- Scripts - Chart.js loaded async, main.js deferred for optimal loading -->
+    <script
+      src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"
+      defer
+      onerror="console.error('Chart.js failed to load from CDN - Analytics charts disabled')"
+    ></script>
+    <script
+      type="module"
+      src="/static/main.js"
+      defer
+    ></script>
+  </body>
+</html>
