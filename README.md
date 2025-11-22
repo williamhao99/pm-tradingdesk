@@ -19,7 +19,7 @@ cp .env.example .env
 ./scripts/run-dashboard.sh
 ```
 
-## API Endpoints
+## Kalshi Dashboard - API Endpoints
 
 **HTTP**
 - `GET /` - Dashboard UI
@@ -32,3 +32,14 @@ cp .env.example .env
 - `lookup_ticker`, `get_orderbook`, `unsubscribe_market` - Market data
 - `get_hotkeys`, `start_hotkey_bot`, `stop_hotkey_bot`, `bot_execute_hotkey`, `generate_hotkeys` - Hotkey automation
 - `take_snapshot`, `get_analytics` - Analytics
+
+## NHL Data Collection
+
+Scrape expected goals (xG) and game results from MoneyPuck.com for NHL prediction markets.
+
+```bash
+# Scrape all games from 2024-25 and 2025-26 seasons
+python3 scripts/scrape_nhl_games.py
+```
+
+Output: `nhl_xg_data.csv` with period-by-period xG, actual goals, and winners.

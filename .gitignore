@@ -11,8 +11,9 @@ data/
 *.sqlite
 *.sqlite3
 
-# Performance Testing Output
-tests/kalshi/performance_metrics.json
+# Data files
+*.csv
+*.json
 
 # Python
 __pycache__/
