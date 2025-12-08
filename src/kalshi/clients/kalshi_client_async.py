@@ -5,8 +5,7 @@ import logging
 import os
 import time
 import uuid
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import aiohttp
 from cachetools import TTLCache
@@ -33,14 +32,7 @@ load_dotenv()
 
 
 class AsyncKalshiClient:
-    """
-    Simple async Kalshi client with caching and error handling.
-
-    Features:
-    - TTL-based caching for market metadata (titles, descriptions)
-    - Exponential backoff retry logic
-    - Automatic request signing
-    """
+    """Async Kalshi client with caching and retry logic."""
 
     def __init__(self, private_key_path: str = "kalshi_private_key.pem"):
         self.api_key_id = os.getenv("KALSHI_API_KEY_ID")
@@ -94,7 +86,6 @@ class AsyncKalshiClient:
 
         for attempt in range(max_retries):
             timestamp = str(int(time.time() * 1000))
-            # Prepend Kalshi API path prefix for signature
             full_path = f"/trade-api/v2{path}"
             signature = sign_request(self.private_key, timestamp, method, full_path)
 
@@ -116,10 +107,21 @@ class AsyncKalshiClient:
                     get_monitor().track_api_call(path, latency_ms, response.status)
 
                     if response.status >= 400:
-                        error_msg = result.get("message", "Unknown error")
+                        # Kalshi error responses may have different structures
+                        error_msg = (
+                            result.get("message")
+                            or result.get("error")
+                            or result.get("msg")
+                            or str(result)
+                        )
 
                         if response.status < 500:  # Don't retry 4xx errors
-                            logger.error("API error %s: %s", response.status, error_msg)
+                            logger.error(
+                                "API error %s: %s (full response: %s)",
+                                response.status,
+                                error_msg,
+                                result,
+                            )
                             raise aiohttp.ClientResponseError(
                                 request_info=response.request_info,
                                 history=response.history,
@@ -239,8 +241,9 @@ class AsyncKalshiClient:
         yes_price: Optional[int] = None,
         no_price: Optional[int] = None,
         client_order_id: Optional[str] = None,
+        time_in_force: str = "gtc",
     ) -> Dict:
-        """Place order with automatic client_order_id for idempotency."""
+        """Place order. time_in_force: gtc, ioc, or fok."""
         if count <= 0:
             raise ValueError(f"Count must be positive, got: {count}")
         if count > 25000:
@@ -249,6 +252,16 @@ class AsyncKalshiClient:
             raise ValueError(f"Invalid action: {action}")
         if side not in ("yes", "no"):
             raise ValueError(f"Invalid side: {side}")
+
+        tif_map = {
+            "gtc": "good_till_canceled",
+            "ioc": "immediate_or_cancel",
+            "fok": "fill_or_kill",
+        }
+        tif_lower = time_in_force.lower()
+        if tif_lower not in tif_map:
+            raise ValueError(f"Invalid time_in_force: {time_in_force}")
+        kalshi_tif = tif_map[tif_lower]
 
         if yes_price is not None and (yes_price < 1 or yes_price > 99):
             raise ValueError(f"yes_price must be 1-99, got: {yes_price}")
@@ -265,6 +278,7 @@ class AsyncKalshiClient:
             "count": count,
             "type": "limit",
             "client_order_id": client_order_id,
+            "time_in_force": kalshi_tif,
         }
 
         if side == "yes" and yes_price is not None:

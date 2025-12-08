@@ -1,8 +1,8 @@
 """Lightweight performance monitoring for trading operations."""
 
 import time
-from typing import Dict, Optional
 from collections import defaultdict, deque
+from typing import Dict
 from contextlib import contextmanager
 
 
