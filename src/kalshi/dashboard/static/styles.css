@@ -128,6 +128,7 @@ h1 {
   font-weight: 700;
   font-family: "SF Mono", "Monaco", "Inconsolata", monospace;
   letter-spacing: -0.5px;
+  white-space: nowrap;
 }
 
 .status-value.portfolio {
@@ -1035,4 +1036,5 @@ button.danger:hover {
   color: var(--text);
   font-family: "SF Mono", "Monaco", "Inconsolata", monospace;
   letter-spacing: -0.5px;
+  white-space: nowrap;
 }

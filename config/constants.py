@@ -12,15 +12,16 @@ KALSHI_BASE_URL = "https://api.elections.kalshi.com"  # Without /trade-api/v2 su
 KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 
 # API timeouts (seconds)
-API_REQUEST_TIMEOUT = 10  # If Kalshi doesn't respond in 10s, something is wrong
+API_REQUEST_TIMEOUT = 3  # Fail fast but allow time for batch operations
 
 # Retry configuration
 RETRY_MAX_ATTEMPTS = 2  # Try once, retry once if 5xx error
-RETRY_BASE_DELAY_SECONDS = 0.5
+RETRY_BASE_DELAY_SECONDS = 0.1  # Faster retry for trading
 RETRY_BACKOFF_MULTIPLIER = 2
 
 # Cache configuration
 MARKET_CACHE_TTL = 300.0  # 5 minutes - market metadata rarely changes
+MARKET_CACHE_SIZE = 200  # Number of markets to cache
 
 # Pagination limits
 MAX_POSITIONS_PER_PAGE = 1000

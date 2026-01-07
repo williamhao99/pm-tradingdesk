@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import sys
-import time
 import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -57,11 +56,7 @@ async def enrich_items_with_market_data(
     ticker_key: str = "ticker",
     enrich_prices: bool = False,
 ) -> None:
-    """
-    Enrich items with market metadata (title, subtitles, optionally prices, status).
-
-    Mutates items in-place by adding market data fields.
-    """
+    """Enrich items in-place with market metadata (title, subtitles, prices, status)."""
     if not items:
         return
 
@@ -95,11 +90,7 @@ async def enrich_items_with_market_data(
 
 
 async def get_enriched_positions() -> tuple[list[Dict], int]:
-    """
-    Get positions enriched with prices and current_value calculated.
-    Returns (positions, total_positions_value_cents).
-    Single source of truth for position value calculation.
-    """
+    """Get positions with prices and current_value. Returns (positions, total_value_cents)."""
     global kalshi_client
 
     positions = await kalshi_client.get_positions()
@@ -122,16 +113,12 @@ async def get_enriched_positions() -> tuple[list[Dict], int]:
         effective_price = pos.get(f"{side}_price")
         market_status = pos.get("market_status")
 
-        # Calculate current value
         if effective_price is None:
             pos["current_value"] = 0
         else:
             contracts = abs(position)
             current_value = contracts * effective_price
             pos["current_value"] = current_value
-
-            # Exclude closed/settled markets from total (awaiting settlement)
-            # This matches Kalshi's official portfolio calculation
             if market_status not in ("closed", "settled"):
                 total_value += current_value
 
@@ -274,25 +261,37 @@ def get_bot_status() -> Dict[str, Any]:
 async def handle_kalshi_ws_message(data: Dict[str, Any]) -> None:
     """Forward Kalshi WebSocket messages to frontend client."""
     msg_type = data.get("type") or data.get("msg")
+    msg = data.get("msg", data)
+    if isinstance(msg, str):
+        msg = data
 
     if msg_type == "fill":
         await send_to_client({"type": "new_fill", "data": data})
-    elif msg_type in ["ticker", "trade"]:
-        ticker = data.get("ticker") or data.get("market_ticker")
+    elif msg_type == "ticker":
+        ticker = msg.get("ticker") or msg.get("market_ticker")
         if ticker:
-            market = data.get("market", {})
+            payload = {**msg, "msg_type": msg_type}
+            await send_to_client(
+                {"type": "orderbook_update", "ticker": ticker, "data": payload}
+            )
+    elif msg_type == "trade":
+        ticker = msg.get("ticker") or msg.get("market_ticker")
+        if ticker:
+            market = msg.get("market", {})
             yes_price = market.get("yes_price") or market.get("last_price")
             if yes_price is not None and market.get("no_price") is None:
                 market["no_price"] = 100 - yes_price
 
+            payload = {**msg, "msg_type": msg_type}
             await send_to_client(
-                {"type": "market_update", "ticker": ticker, "data": data}
+                {"type": "market_update", "ticker": ticker, "data": payload}
             )
     elif msg_type == "orderbook_delta" or msg_type == "orderbook_snapshot":
-        ticker = data.get("ticker") or data.get("market_ticker")
+        ticker = msg.get("ticker") or msg.get("market_ticker")
         if ticker:
+            payload = {**msg, "msg_type": msg_type}
             await send_to_client(
-                {"type": "orderbook_update", "ticker": ticker, "data": data}
+                {"type": "orderbook_update", "ticker": ticker, "data": payload}
             )
 
 
@@ -439,11 +438,14 @@ async def get_metrics():
 
 async def handle_get_balance(data: Dict) -> Dict:
     """Get balance with portfolio calculations."""
-    balance_result = await kalshi_client.get_balance()
+    # Fetch balance and enriched positions in parallel
+    balance_task = kalshi_client.get_balance()
+    positions_task = get_enriched_positions()
+    balance_result, (_, positions_value_cents) = await asyncio.gather(
+        balance_task, positions_task
+    )
+
     cash_cents = balance_result.get("balance", 0)
-
-    _, positions_value_cents = await get_enriched_positions()
-
     portfolio_value_cents = cash_cents + positions_value_cents
 
     return {
@@ -478,9 +480,7 @@ async def handle_get_fills(data: Dict) -> Dict:
         fill_side = fill.get("side")
         fill_action = fill.get("action")
 
-        # API flips side for sell orders to show the counterparty perspective
-        # E.g. selling NO @ 99¢: API returns side="yes", action="sell", yes_price=1¢
-        # We need to flip it back to show what actually happened: sold NO @ 99¢
+        # API flips side for sells - flip back to show actual trade
         if fill_action == "sell":
             display_side = "no" if fill_side == "yes" else "yes"
             price_cents = fill.get(f"{display_side}_price", 0)
@@ -563,30 +563,29 @@ async def handle_get_orderbook(data: Dict) -> Dict:
     """Get full orderbook and subscribe to real-time updates."""
     ticker = data.get("ticker")
 
-    # Fetch market info and orderbook in parallel
-    market_task = kalshi_client.get_market(ticker)
-    orderbook_task = kalshi_client.get_orderbook(ticker, depth=10)
+    try:
+        market_task = kalshi_client.get_market(ticker)
+        orderbook_task = kalshi_client.get_orderbook(ticker, depth=5)
+        market, orderbook_response = await asyncio.gather(market_task, orderbook_task)
+    except Exception:
+        return {"type": "orderbook", "ticker": ticker, "error": "Market not found"}
 
-    market, orderbook_response = await asyncio.gather(market_task, orderbook_task)
     market_info = market.get("market", {})
+    orderbook = orderbook_response.get("orderbook", {})
 
-    orderbook = orderbook_response.get(
-        "orderbook", {}
-    )  # Extract orderbook from nested response
-
-    # Get last traded prices as fallback
-    yes_price = market_info.get("yes_price") or market_info.get("last_price")
-    no_price = market_info.get("no_price")
-    if no_price is None and yes_price is not None:
-        no_price = 100 - yes_price
-
-    # Subscribe to live updates
     if kalshi_ws_client:
         await kalshi_ws_client.subscribe_to_ticker(ticker)
 
-    # Handle None values - Kalshi returns None when no bids exist
     yes_bids = orderbook.get("yes") or []
     no_bids = orderbook.get("no") or []
+
+    # Calculate ASK prices from orderbook (what you'd pay to buy)
+    # YES ask = 100 - best NO bid, NO ask = 100 - best YES bid
+    best_yes_bid = max((p for p, s in yes_bids if s > 0), default=None)
+    best_no_bid = max((p for p, s in no_bids if s > 0), default=None)
+
+    yes_price = (100 - best_no_bid) if best_no_bid is not None else None
+    no_price = (100 - best_yes_bid) if best_yes_bid is not None else None
 
     return {
         "type": "orderbook",
@@ -615,9 +614,7 @@ async def handle_quick_order(data: Dict) -> Dict:
             side = data.get("side")
             count = data.get("count")
 
-            aggressive_price = (
-                99 if order_action == "buy" else 1
-            )  # Max aggressive pricing
+            aggressive_price = 99 if order_action == "buy" else 1
 
             yes_price = aggressive_price if side == "yes" else None
             no_price = aggressive_price if side == "no" else None
@@ -851,15 +848,9 @@ ACTION_HANDLERS = {
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """
-    WebSocket endpoint for real-time communication.
-    Routes incoming messages to appropriate handlers.
-
-    Single-connection design: Opening dashboard in multiple tabs will disconnect previous tabs.
-    """
+    """WebSocket endpoint. Single-connection: new tabs disconnect previous ones."""
     global active_websocket
 
-    # Close previous connection if exists
     if active_websocket is not None:
         try:
             await active_websocket.close()

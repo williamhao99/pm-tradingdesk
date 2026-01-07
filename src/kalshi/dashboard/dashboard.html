@@ -325,7 +325,9 @@
                     id="series-ticker-input"
                     placeholder="e.g., KXGOVSHUTLENGTH"
                     autocomplete="off"
-                    onkeypress="if(event.key === 'Enter') client.generateHotkeys()"
+                    onkeypress="
+                      if (event.key === 'Enter') client.generateHotkeys();
+                    "
                   />
                   <div class="help-text">Press Enter to generate hotkeys</div>
                   <div
@@ -473,7 +475,11 @@
     <script
       src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"
       defer
-      onerror="console.error('Chart.js failed to load from CDN - Analytics charts disabled')"
+      onerror="
+        console.error(
+          'Chart.js failed to load from CDN - Analytics charts disabled',
+        )
+      "
     ></script>
     <script
       type="module"

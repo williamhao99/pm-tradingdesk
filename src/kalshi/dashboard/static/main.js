@@ -95,7 +95,7 @@ class KalshiTradingClient {
       orders: () => this.ui.displayOrders(data.orders),
       fills: () => this.ui.displayFills(data.fills),
       ticker_lookup: () => this.handleTickerLookup(data),
-      orderbook: () => this.ui.displayOrderbook(data),
+      orderbook: () => this.handleOrderbook(data),
       market_update: () => this.handleMarketUpdate(data),
       orderbook_update: () => this.handleMarketUpdate(data),
       kalshi_ws_status: () => {
@@ -227,6 +227,31 @@ class KalshiTradingClient {
   }
 
   /**
+   * Handle orderbook response (combined lookup + orderbook)
+   */
+  handleOrderbook(data) {
+    const statusElement = document.getElementById("ticker-lookup-status");
+
+    if (data.error) {
+      this.ui.selectedTicker = null;
+      this.ui.currentSubscribedTicker = null;
+      if (statusElement) {
+        statusElement.textContent = "[FAILED] Market not found";
+        statusElement.style.color = "#ef4444";
+      }
+      this.ui.displayOrderbook(null);
+      return;
+    }
+
+    this.ui.selectedTicker = data.ticker;
+    if (statusElement) {
+      statusElement.textContent = "[OK] Market found";
+      statusElement.style.color = "#10b981";
+    }
+    this.ui.displayOrderbook(data);
+  }
+
+  /**
    * Handle market update (ticker/orderbook updates)
    */
   handleMarketUpdate(data) {
@@ -252,38 +277,70 @@ class KalshiTradingClient {
     } else if (data.type === "orderbook_update") {
       // Real-time WebSocket update
       const wsData = data.data || {};
-      const msg = wsData.msg || wsData.type;
+      const msgType = wsData.msg_type || wsData.msg || wsData.type;
 
       // Handle ticker updates (top of book)
-      if (msg === "ticker") {
+      // Show ASK prices (what you'd pay to buy) = 100 - opposite side's bid
+      if (msgType === "ticker") {
         const yes_bid = wsData.yes_bid;
         const no_bid = wsData.no_bid;
 
         if (yes_bid !== undefined && no_bid !== undefined) {
-          this.ui.currentOrderbookData.yes_price = yes_bid;
-          this.ui.currentOrderbookData.no_price = no_bid;
+          this.ui.currentOrderbookData.yes_price = 100 - no_bid; // YES ask
+          this.ui.currentOrderbookData.no_price = 100 - yes_bid; // NO ask
           this.ui.displayOrderbook(this.ui.currentOrderbookData);
           this.ui.updateLimitPrice();
         }
       }
       // Handle orderbook delta updates (full depth)
-      else if (msg === "orderbook_delta" || msg === "orderbook_update") {
+      else if (
+        msgType === "orderbook_delta" ||
+        msgType === "orderbook_update"
+      ) {
         this.applyOrderbookDelta(wsData);
       }
       // Handle orderbook snapshot (full book reset)
-      else if (msg === "orderbook_snapshot") {
-        const yes_bids = wsData.yes || [];
-        const no_bids = wsData.no || [];
+      else if (msgType === "orderbook_snapshot") {
+        // Sort descending for binary search in delta updates
+        const yes_bids = [...(wsData.yes || [])].sort((a, b) => b[0] - a[0]);
+        const no_bids = [...(wsData.no || [])].sort((a, b) => b[0] - a[0]);
 
         this.ui.currentOrderbookData.yes_bids = yes_bids;
         this.ui.currentOrderbookData.no_bids = no_bids;
+
+        // Update prices from best bids (ASK = 100 - opposite bid)
+        if (no_bids.length > 0) {
+          this.ui.currentOrderbookData.yes_price = 100 - no_bids[0][0];
+        }
+        if (yes_bids.length > 0) {
+          this.ui.currentOrderbookData.no_price = 100 - yes_bids[0][0];
+        }
+
         this.ui.displayOrderbook(this.ui.currentOrderbookData);
       }
     }
   }
 
   /**
+   * Binary search for insertion point in descending sorted array
+   * @param {Array} arr - Array of [price, size] pairs, sorted descending by price
+   * @param {number} price - Price to find insertion point for
+   * @returns {number} Index where price should be inserted
+   */
+  binarySearchDescending(arr, price) {
+    let lo = 0,
+      hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (arr[mid][0] > price) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  /**
    * Apply orderbook delta to current orderbook state
+   * Uses binary insertion for O(n) instead of O(n log n) sort
    * @param {Object} delta - Orderbook delta message
    */
   applyOrderbookDelta(delta) {
@@ -298,24 +355,35 @@ class KalshiTradingClient {
     const bidsKey = side === "yes" ? "yes_bids" : "no_bids";
     let bids = this.ui.currentOrderbookData[bidsKey] || [];
 
-    // Find existing price level
-    const index = bids.findIndex(([p]) => p === price);
+    // Binary search for price (array is sorted descending)
+    const index = this.binarySearchDescending(bids, price);
+    const found = index < bids.length && bids[index][0] === price;
 
-    if (deltaSize === 0 || (index >= 0 && bids[index][1] + deltaSize <= 0)) {
+    if (deltaSize === 0 || (found && bids[index][1] + deltaSize <= 0)) {
       // Remove price level if size becomes 0 or negative
-      if (index >= 0) {
+      if (found) {
         bids.splice(index, 1);
       }
-    } else if (index >= 0) {
+    } else if (found) {
       // Update existing price level
       bids[index][1] += deltaSize;
     } else if (deltaSize > 0) {
-      // Add new price level and sort (descending for bids)
-      bids.push([price, deltaSize]);
-      bids.sort((a, b) => b[0] - a[0]);
+      // Insert at correct position (maintains descending sort)
+      bids.splice(index, 0, [price, deltaSize]);
     }
 
     this.ui.currentOrderbookData[bidsKey] = bids;
+
+    // Update prices from best bids (ASK = 100 - opposite bid)
+    const yesBids = this.ui.currentOrderbookData.yes_bids || [];
+    const noBids = this.ui.currentOrderbookData.no_bids || [];
+    if (noBids.length > 0) {
+      this.ui.currentOrderbookData.yes_price = 100 - noBids[0][0]; // YES ask
+    }
+    if (yesBids.length > 0) {
+      this.ui.currentOrderbookData.no_price = 100 - yesBids[0][0]; // NO ask
+    }
+
     this.ui.displayOrderbook(this.ui.currentOrderbookData);
   }
 
@@ -337,7 +405,19 @@ class KalshiTradingClient {
       return;
     }
 
-    this.wsClient.send("lookup_ticker", { ticker: sanitized });
+    // Unsubscribe from previous ticker
+    if (
+      this.ui.currentSubscribedTicker &&
+      this.ui.currentSubscribedTicker !== sanitized
+    ) {
+      this.wsClient.send("unsubscribe_market", {
+        ticker: this.ui.currentSubscribedTicker,
+      });
+    }
+
+    // Go directly to orderbook (skips redundant lookup_ticker round-trip)
+    this.ui.currentSubscribedTicker = sanitized;
+    this.wsClient.send("get_orderbook", { ticker: sanitized });
   }
 
   /**

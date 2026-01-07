@@ -617,7 +617,7 @@ class IdenticalMarketsStrategy:
         self.total_edge_cents = 0.0
         self.start_time = time.time()
 
-        # Execution lock to prevent concurrent arb attempts
+        # Lock + flag to prevent concurrent arb attempts
         self._executing = False
         self._execution_lock = asyncio.Lock()
 
@@ -644,7 +644,7 @@ class IdenticalMarketsStrategy:
         no_levels = msg.get("no", []) or []
 
         self.books[ticker].apply_snapshot(yes_levels, no_levels, seq)
-        logger.info(f"Snapshot received for {ticker}: {self.books[ticker]}")
+        logger.debug(f"Snapshot received for {ticker}: {self.books[ticker]}")
 
         await self._check_arb()
 
@@ -683,7 +683,7 @@ class IdenticalMarketsStrategy:
             self.arb_count += 1
             self.last_arb_time = time.time()
             self.total_edge_cents += arb.net_edge_cents
-            logger.info(f"*** {arb} ***")
+            logger.debug(f"Arb detected: {arb}")
 
             if self.on_arb:
                 self.on_arb(arb)
@@ -805,19 +805,15 @@ async def run_strategy(cfg: Config):
     )
 
     async def handle_arb(arb: ArbOpportunity):
-        if cfg.mode == TradingMode.MONITOR:
-            strategy._executing = False
-            return
-        if not strategy:
-            strategy._executing = False
-            return
-
-        try:
-            # Execute arb with lock to prevent concurrent API calls
-            async with strategy._execution_lock:
+        async with strategy._execution_lock:
+            try:
+                if cfg.mode == TradingMode.MONITOR:
+                    return
+                if not strategy:
+                    return
                 await executor.execute_arb(arb, cfg, books=strategy.books)
-        finally:
-            strategy._executing = False
+            finally:
+                strategy._executing = False
 
     def on_arb(arb: ArbOpportunity):
         # Check BEFORE creating task - don't queue multiple arbs

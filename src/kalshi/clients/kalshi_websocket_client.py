@@ -10,27 +10,14 @@ from typing import Any, Callable, Dict, Optional, Set
 import websockets
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
-from websockets.client import WebSocketClientProtocol
 
-from ..tools.performance_monitor import get_monitor
+from src.kalshi.tools.performance_monitor import get_monitor
 
 logger = logging.getLogger(__name__)
 
 
 class KalshiWebSocketClient:
-    """
-    Real-time WebSocket client for Kalshi API.
-
-    Subscribes to:
-    - fills: Real-time trade executions
-    - ticker: Price updates for subscribed markets
-    - orderbook_delta: Incremental orderbook changes with sequence numbers
-
-    Features:
-    - Automatic reconnection with exponential backoff
-    - Sequence number gap detection for orderbook_delta
-    - Callback system to push updates to frontend
-    """
+    """Real-time WebSocket client for Kalshi API with auto-reconnection."""
 
     def __init__(
         self,
@@ -46,7 +33,7 @@ class KalshiWebSocketClient:
         self.on_message = on_message
         self.on_status_change = on_status_change
 
-        self.ws: Optional[WebSocketClientProtocol] = None
+        self.ws: Optional[websockets.ClientConnection] = None
         self.is_running = False
         self.reconnect_attempts = 0
         self.max_reconnect_delay = 30.0
@@ -54,8 +41,9 @@ class KalshiWebSocketClient:
         self.subscribed_tickers: Set[str] = set()
         self.orderbook_sequences: Dict[str, int] = {}
         self.ticker_sids: Dict[str, list[int]] = {}
+        self._awaiting_snapshot: Set[str] = set()  # Tickers waiting for fresh snapshot
+        self._last_resubscribe: Dict[str, float] = {}  # Cooldown to prevent thrashing
 
-        # Track pending subscriptions by request ID to prevent race conditions
         self._next_request_id = 1
         self._pending_subscriptions: Dict[int, str] = {}  # request_id -> ticker
 
@@ -189,7 +177,7 @@ class KalshiWebSocketClient:
                 )
                 await asyncio.sleep(delay)
 
-    async def _message_loop(self, websocket: WebSocketClientProtocol):
+    async def _message_loop(self, websocket: websockets.ClientConnection):
         """Process incoming WebSocket messages."""
         async for message in websocket:
             try:
@@ -220,7 +208,6 @@ class KalshiWebSocketClient:
                 channel = msg.get("channel")
                 sid = msg.get("sid")
 
-                # Look up ticker by request ID to prevent race conditions
                 ticker = self._pending_subscriptions.pop(request_id, None)
 
                 if ticker and channel in ["ticker", "orderbook_delta"]:
@@ -244,20 +231,46 @@ class KalshiWebSocketClient:
                 logger.error(f"Kalshi WebSocket error: {data}")
             return
 
+        if msg_type == "orderbook_snapshot":
+            # Snapshot received - clear awaiting flag and reset sequence tracking
+            msg = data.get("msg", data)
+            ticker = msg.get("market_ticker") or msg.get("ticker")
+            if ticker:
+                self._awaiting_snapshot.discard(ticker)
+                self.orderbook_sequences.pop(ticker, None)  # Will be set by first delta
+
         if msg_type == "orderbook_delta" or msg_type == "orderbook_update":
-            ticker = data.get("ticker") or data.get("market_ticker")
-            seq = data.get("seq")
+            # Data may be nested inside 'msg' field
+            msg = data.get("msg", data)
+            ticker = msg.get("market_ticker") or msg.get("ticker")
+            seq = data.get("seq")  # seq is at top level
+
+            # Ignore deltas while waiting for fresh snapshot
+            if ticker and ticker in self._awaiting_snapshot:
+                return
 
             if ticker and seq is not None:
                 expected_seq = self.orderbook_sequences.get(ticker)
 
                 if expected_seq is not None and seq != expected_seq + 1:
-                    logger.warning(
-                        f"Orderbook gap detected for {ticker}: "
-                        f"expected seq {expected_seq + 1}, got {seq}. "
-                        f"Resubscribing..."
-                    )
-                    await self.subscribe_to_ticker(ticker)
+                    # Rate limit resubscribes to prevent thrashing (5s cooldown)
+                    now = time.time()
+                    last_resub = self._last_resubscribe.get(ticker, 0)
+                    if now - last_resub < 5.0:
+                        # Still in cooldown - just accept the gap and continue
+                        logger.debug(
+                            f"Gap for {ticker} (seq {expected_seq + 1} -> {seq}), cooldown active"
+                        )
+                    else:
+                        logger.warning(
+                            f"Orderbook gap for {ticker}: seq {expected_seq + 1} -> {seq}. Resubscribing..."
+                        )
+                        self._last_resubscribe[ticker] = now
+                        self._awaiting_snapshot.add(ticker)
+                        # Unsubscribe first to force fresh snapshot on resubscribe
+                        await self.unsubscribe_from_ticker(ticker)
+                        await self.subscribe_to_ticker(ticker)
+                        return
 
                 self.orderbook_sequences[ticker] = seq
 

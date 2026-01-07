@@ -33,6 +33,13 @@ export class UIController {
     this.wsClient.send("get_positions");
     this.wsClient.send("get_orders", { status: "resting" });
     this.wsClient.send("get_fills", { limit: 20 });
+
+    // Re-request orderbook if one was being viewed
+    if (this.currentSubscribedTicker) {
+      this.wsClient.send("get_orderbook", {
+        ticker: this.currentSubscribedTicker,
+      });
+    }
   }
 
   /**
@@ -366,6 +373,13 @@ export class UIController {
       return;
     }
 
+    // Sort bids descending for binary search in delta updates
+    if (data.yes_bids) {
+      data.yes_bids = [...data.yes_bids].sort((a, b) => b[0] - a[0]);
+    }
+    if (data.no_bids) {
+      data.no_bids = [...data.no_bids].sort((a, b) => b[0] - a[0]);
+    }
     this.currentOrderbookData = data;
     container.innerHTML = this.buildOrderbookHTML(data);
     this.setTradingSectionsState(

@@ -15,6 +15,7 @@ from config.constants import (
     API_REQUEST_TIMEOUT,
     ERROR_NO_API_KEY,
     KALSHI_API_URL,
+    MARKET_CACHE_SIZE,
     MARKET_CACHE_TTL,
     MAX_POSITIONS_PER_PAGE,
     PROJECT_ROOT,
@@ -49,7 +50,7 @@ class AsyncKalshiClient:
 
         self.session = None  # Lazy initialization for proper cleanup
         self._session_lock = asyncio.Lock()
-        self.market_cache = TTLCache(maxsize=50, ttl=MARKET_CACHE_TTL)
+        self.market_cache = TTLCache(maxsize=MARKET_CACHE_SIZE, ttl=MARKET_CACHE_TTL)
 
     async def __aenter__(self):
         return self
@@ -181,7 +182,7 @@ class AsyncKalshiClient:
 
         return result
 
-    async def get_orderbook(self, ticker: str, depth: int = 10) -> Dict:
+    async def get_orderbook(self, ticker: str, depth: int = 5) -> Dict:
         """Get orderbook with [price, size] pairs for yes/no sides."""
         return await self._request("GET", f"/markets/{ticker}/orderbook?depth={depth}")
 
