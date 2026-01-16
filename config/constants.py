@@ -25,7 +25,7 @@ MARKET_CACHE_SIZE = 200  # Number of markets to cache
 
 # Pagination limits
 MAX_POSITIONS_PER_PAGE = 1000
-DEFAULT_FILLS_LIMIT = 20
+DEFAULT_FILLS_LIMIT = 100
 
 # Error messages
 ERROR_NO_API_KEY = "KALSHI_API_KEY_ID must be set in .env file"
