@@ -523,21 +523,21 @@ class KalshiTradingClient {
   }
 
   /**
-   * Generate hotkeys from series ticker
+   * Generate hotkeys from series or event ticker
    */
   generateHotkeys() {
-    const seriesInput = document.getElementById("series-ticker-input");
+    const tickerInput = document.getElementById("series-ticker-input");
     const shareInput = document.getElementById("share-count-input");
     const statusDiv = document.getElementById("generator-status");
     const generateBtn = document.querySelector(
       'button[onclick*="generateHotkeys"]',
     );
 
-    const seriesTicker = seriesInput.value.trim().toUpperCase();
+    const ticker = tickerInput.value.trim().toUpperCase();
     const shareCount = parseInt(shareInput.value) || 200;
 
-    if (!seriesTicker) {
-      statusDiv.textContent = "[WARNING] Please enter a series ticker";
+    if (!ticker) {
+      statusDiv.textContent = "[WARNING] Please enter a series or event ticker";
       return;
     }
     if (generateBtn) {
@@ -546,7 +546,7 @@ class KalshiTradingClient {
     }
     statusDiv.textContent = "Starting...";
     this.wsClient.send("generate_hotkeys", {
-      series_ticker: seriesTicker,
+      series_ticker: ticker,
       share_count: shareCount,
     });
   }
@@ -588,6 +588,8 @@ window.loadFills = (event) => client.ui.loadFills(event);
 window.loadPositions = (event) => client.ui.loadPositions(event);
 window.cancelOrder = (orderId) => client.cancelOrder(orderId);
 window.executeBotHotkey = (keyword) => client.executeBotHotkey(keyword);
+window.dismissHotkey = (keyword) => client.ui.dismissHotkey(keyword);
+window.resetDismissedHotkeys = () => client.ui.resetDismissedHotkeys();
 window.handleListItemClick = (event, ticker) => {
   if (event.target.tagName === "BUTTON") return;
   navigator.clipboard

@@ -319,17 +319,17 @@
                 "
               >
                 <div class="form-group">
-                  <label>Series Ticker</label>
+                  <label>Series or Event Ticker</label>
                   <input
                     type="text"
                     id="series-ticker-input"
-                    placeholder="e.g., KXGOVSHUTLENGTH"
+                    placeholder="e.g., KXNBAMENTION-26FEB22BOSLAL or KXGOVSHUTLENGTH"
                     autocomplete="off"
                     onkeypress="
                       if (event.key === 'Enter') client.generateHotkeys();
                     "
                   />
-                  <div class="help-text">Press Enter to generate hotkeys</div>
+                  <div class="help-text">Series ticker for all markets, or event ticker for a single game</div>
                   <div
                     id="generator-status"
                     class="status-text"

@@ -74,7 +74,7 @@ async def _fetch_all_market_details(
 
 
 async def fetch_markets_by_pattern(search_pattern: str) -> List[Dict]:
-    """Fetch markets by series ticker."""
+    """Fetch markets by series ticker or event ticker (auto-detected)."""
     print(f"Searching for markets matching: {search_pattern}")
 
     try:
@@ -85,7 +85,15 @@ async def fetch_markets_by_pattern(search_pattern: str) -> List[Dict]:
         key_file = PROJECT_ROOT / "kalshi_private_key.pem"
         private_key = load_private_key(key_file)
 
-        path = f"/trade-api/v2/markets?limit=200&series_ticker={search_pattern}&status=open"
+        # Auto-detect: event tickers contain hyphens (e.g. KXNBAMENTION-26FEB22BOSLAL)
+        if "-" in search_pattern:
+            param = f"event_ticker={search_pattern}"
+            print(f"  Detected event ticker: {search_pattern}")
+        else:
+            param = f"series_ticker={search_pattern}"
+            print(f"  Detected series ticker: {search_pattern}")
+
+        path = f"/trade-api/v2/markets?limit=200&{param}&status=open"
         headers = get_auth_headers(private_key, api_key_id, "GET", path)
         url = f"{KALSHI_BASE_URL}{path}"
 
@@ -201,10 +209,10 @@ async def interactive_mode() -> None:
     print("-" * 40)
 
     print("\nExamples:")
-    print("  - KXEARNINGSMENTIONAAPL")
-    print("  - KXEARNINGSMENTIONTSLA")
+    print("  - KXEARNINGSMENTIONAAPL          (series - all markets)")
+    print("  - KXNBAMENTION-26FEB22BOSLAL     (event - single game)")
 
-    search_pattern = input("\nEnter series ticker: ").strip().upper()
+    search_pattern = input("\nEnter series or event ticker: ").strip().upper()
 
     if not search_pattern:
         print("No pattern provided")

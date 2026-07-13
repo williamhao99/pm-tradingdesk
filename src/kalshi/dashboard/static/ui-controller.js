@@ -23,6 +23,8 @@ export class UIController {
     this.currentOrderbookData = null;
     this.currentSubscribedTicker = null;
     this.portfolioChart = null;
+    this.dismissedHotkeys = new Set();
+    this.currentHotkeys = null;
   }
 
   /**
@@ -585,14 +587,19 @@ export class UIController {
   }
 
   /**
-   * Display bot hotkeys
+   * Display bot hotkeys (respects dismissed set)
    * @param {Object} hotkeys - Hotkeys configuration object
    */
   displayBotHotkeys(hotkeys) {
     const container = document.getElementById("bot-hotkeys-grid");
     if (!container) return;
 
-    if (!hotkeys || Object.keys(hotkeys).length === 0) {
+    if (hotkeys) {
+      this.currentHotkeys = hotkeys;
+    }
+
+    const hk = this.currentHotkeys;
+    if (!hk || Object.keys(hk).length === 0) {
       container.innerHTML =
         '<div class="empty-state">No hotkeys configured</div>';
       return;
@@ -607,18 +614,65 @@ export class UIController {
         .join(" ");
     };
 
-    const buttons = Object.entries(hotkeys)
+    const allEntries = Object.entries(hk);
+    const visibleEntries = allEntries.filter(
+      ([keyword]) => !this.dismissedHotkeys.has(keyword),
+    );
+    const dismissedCount = this.dismissedHotkeys.size;
+    const totalCount = allEntries.length;
+
+    // Toolbar with counter and reset button
+    let toolbarHTML = "";
+    if (dismissedCount > 0) {
+      toolbarHTML = `
+        <div class="hotkeys-toolbar">
+          <span class="hotkeys-counter">${visibleEntries.length} of ${totalCount} remaining</span>
+          <button class="hotkeys-reset-btn" onclick="window.resetDismissedHotkeys()">Show All</button>
+        </div>`;
+    }
+
+    if (visibleEntries.length === 0) {
+      container.innerHTML = `
+        <div class="hotkeys-toolbar">
+          <span class="hotkeys-counter">0 of ${totalCount} remaining</span>
+          <button class="hotkeys-reset-btn" onclick="window.resetDismissedHotkeys()">Show All</button>
+        </div>
+        <div class="empty-state">All hotkeys dismissed</div>`;
+      return;
+    }
+
+    const buttons = visibleEntries
       .map(([keyword, config]) => {
         const title = `${config.action.toUpperCase()} ${config.count} ${config.side.toUpperCase()} @ ${config.ticker}`;
-        return `<button class="hotkey-button"
-                      onclick="window.executeBotHotkey('${keyword}')"
-                      title="${title}">
-                ${toTitleCase(keyword)}
-              </button>`;
+        return `<div class="hotkey-wrapper">
+                  <button class="hotkey-dismiss" onclick="event.stopPropagation(); window.dismissHotkey('${keyword}')" title="Dismiss">&times;</button>
+                  <button class="hotkey-button"
+                        onclick="window.executeBotHotkey('${keyword}')"
+                        title="${title}">
+                  ${toTitleCase(keyword)}
+                </button>
+                </div>`;
       })
       .join("");
 
-    container.innerHTML = buttons;
+    container.innerHTML = toolbarHTML + `<div class="hotkeys-grid-inner">${buttons}</div>`;
+  }
+
+  /**
+   * Dismiss a hotkey from the grid
+   * @param {string} keyword - Hotkey keyword to dismiss
+   */
+  dismissHotkey(keyword) {
+    this.dismissedHotkeys.add(keyword);
+    this.displayBotHotkeys(null);
+  }
+
+  /**
+   * Reset all dismissed hotkeys
+   */
+  resetDismissedHotkeys() {
+    this.dismissedHotkeys.clear();
+    this.displayBotHotkeys(null);
   }
 
   /**
